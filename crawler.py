@@ -2,6 +2,7 @@ from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 import requests
+import os
 
 
 def crawl_website_and_generate_files(url: str):
@@ -11,6 +12,7 @@ def crawl_website_and_generate_files(url: str):
         all_css = ""
         for link in css_data["css_links"]:
             response = requests.get(link, timeout=10)
+            response.raise_for_status()
             all_css += response.text
         all_css += "\n".join([style for style in css_data["inline_styles"] if style])
         return {"html": html, "css": all_css}
@@ -22,9 +24,13 @@ def crawl_website_and_generate_files(url: str):
 def crawl_website_html(url: str):
     print("Crawling the website...")
     with sync_playwright() as p:
-        browser = p.chromium.launch()
+        browser = p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+        )
         page = browser.new_page()
         page.goto(url)
+        page.wait_for_load_state("networkidle")
         html = page.content()
         print("Crawled content length:", len(html))
         browser.close()

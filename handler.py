@@ -5,19 +5,20 @@ import boto3
 import os
 
 
+class RegenerateWebsiteEvent(TypedDict):
+    RegeneratedWebsiteId: str
+    RegeneratedWebsiteUrl: str
+    RegenerationTheme: Optional[str]
+
+
+bucket_name = os.environ.get("S3_BUCKET_NAME")
+s3 = boto3.client("s3")
+ddb = boto3.client("dynamodb")
+sqs = boto3.client("sqs")
+
 
 def lambda_handler(event, context):
-
-    bucket_name = os.environ.get("S3_BUCKET_NAME")
-
-    class RegenerateWebsiteEvent(TypedDict):
-        RegeneratedWebsiteId: str
-        RegeneratedWebsiteUrl: str
-        RegenerationTheme: Optional[str]
-    
-    s3 = boto3.client("s3")
-    ddb = boto3.client("dynamodb")
-    sqs = boto3.client("sqs")
+    failed_message_ids = []
     for record in event["Records"]:
         try:
             body: RegenerateWebsiteEvent = json.loads(record["body"])
@@ -25,13 +26,13 @@ def lambda_handler(event, context):
 
             print("Creating HTML and CSS files")
             s3.put_object(
-                Bucket=bucket_name, 
-                Key=f"{body['RegeneratedWebsiteId']}/index.html", 
+                Bucket=bucket_name,
+                Key=f"{body['RegeneratedWebsiteId']}/index.html",
                 Body=files["html"]
             )
             s3.put_object(
-                Bucket=bucket_name, 
-                Key=f"{body['RegeneratedWebsiteId']}/original-styles.css", 
+                Bucket=bucket_name,
+                Key=f"{body['RegeneratedWebsiteId']}/original-styles.css",
                 Body=files["css"]
             )
             ddb.put_item(
@@ -44,7 +45,7 @@ def lambda_handler(event, context):
             )
             sqs.send_message(
                 QueueUrl=os.environ.get("SQS_QUEUE_URL"),
-                MessageGroupId="website-regeneration",
+                MessageGroupId=body["RegeneratedWebsiteId"],
                 MessageBody=json.dumps({
                     "RegeneratedWebsiteId": body["RegeneratedWebsiteId"],
                     "RegeneratedWebsiteUrl": body["RegeneratedWebsiteUrl"],
@@ -52,10 +53,7 @@ def lambda_handler(event, context):
                 })
             )
         except Exception as e:
-            print(f"Error processing record: {e}")
-            raise
+            print(f"Error processing record {record['messageId']}: {e}")
+            failed_message_ids.append({"itemIdentifier": record["messageId"]})
 
-    return {
-        "statusCode": 200,
-        "body": json.dumps({"message": "Hello from Lambda"}),
-    }
+    return {"batchItemFailures": failed_message_ids}
