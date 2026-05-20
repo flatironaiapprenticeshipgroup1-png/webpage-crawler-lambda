@@ -1,4 +1,4 @@
-playwright
-beautifulsoup4
-requests
-boto3
+playwright==1.60.0
+beautifulsoup4==4.14.3
+requests==2.34.2
+boto3==1.43.10

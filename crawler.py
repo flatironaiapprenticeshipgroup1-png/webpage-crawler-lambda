@@ -1,17 +1,22 @@
 from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
+from urllib.parse import urljoin
 import requests
 
 
 def crawl_website_and_generate_files(url: str):
-    html = crawl_website_html(url)
-    css_data = extract_css(html)
-    all_css = ""
-    for link in css_data["css_links"]:
-        response = requests.get(link)
-        all_css += response.text
-    all_css += "\n".join([style for style in css_data["inline_styles"] if style])
-    return {"html": html, "css": all_css}
+    try:
+        html = crawl_website_html(url)
+        css_data = extract_css(html, url)
+        all_css = ""
+        for link in css_data["css_links"]:
+            response = requests.get(link, timeout=10)
+            all_css += response.text
+        all_css += "\n".join([style for style in css_data["inline_styles"] if style])
+        return {"html": html, "css": all_css}
+    except Exception as e:
+        print(f"Error crawling website: {e}")
+        raise
 
 
 def crawl_website_html(url: str):
@@ -25,10 +30,10 @@ def crawl_website_html(url: str):
         browser.close()
     return html
 
-def extract_css(html: str):
+def extract_css(html: str, base_url: str):
     print("Extracting CSS from HTML...")
     soup = BeautifulSoup(html, "html.parser")
-    css_links = [link["href"] for link in soup.find_all("link", rel="stylesheet")]
+    css_links = [urljoin(base_url, link["href"]) for link in soup.find_all("link", rel="stylesheet")]
     inline_styles = [style.string for style in soup.find_all("style")]
 
     return {"css_links": css_links, "inline_styles": inline_styles}
