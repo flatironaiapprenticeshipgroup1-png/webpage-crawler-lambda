@@ -1,4 +1,5 @@
 import json
+import os
 import boto3
 from crawler import crawl_website_html, extract_css, download_css_files
 from status_publisher import publish_status_update
@@ -9,25 +10,8 @@ sqs = boto3.client("sqs")
 
 
 def lambda_handler(event, context):
-    """
-    AWS Lambda handler for website crawling and AI regeneration workflow.
+    failed_message_ids = []
 
-    Processes SQS messages containing website regeneration requests. For each request:
-    1. Crawls the source website HTML
-    2. Extracts and downloads CSS files
-    3. Saves original HTML and CSS to S3
-    4. Stores job metadata in DynamoDB
-    5. Queues the AI regeneration step to SQS
-
-    Publishes status updates at each step via Ably real-time channels.
-
-    Args:
-        event: SQS event with Records containing RegeneratedWebsiteId, RegeneratedWebsiteUrl, RegenerationTheme
-        context: Lambda context object
-
-    Returns:
-        dict: Response with statusCode 200
-    """
     for record in event["Records"]:
         body = json.loads(record["body"])
         website_id = body["RegeneratedWebsiteId"]
@@ -51,25 +35,29 @@ def lambda_handler(event, context):
             )
 
         try:
-            import os
             bucket = os.environ["S3_BUCKET_NAME"]
             table = os.environ["DYNAMODB_TABLE_NAME"]
             queue_url = os.environ["SQS_QUEUE_URL"]
 
+            print(f"Processing job {website_id} for {url}")
             publish("received", "processing", "Regeneration request received")
 
+            print("Crawling HTML")
             publish("crawling_html", "processing", "Crawling the source website HTML")
             html = crawl_website_html(url)
 
+            print("Extracting CSS")
             publish("extracting_css", "processing", "Extracting CSS references")
             css_info = extract_css(html, url)
             external_css = download_css_files(css_info["css_links"])
             all_css = external_css + "\n".join(css_info["inline_styles"])
 
+            print("Creating HTML and CSS files")
             publish("saving_original_assets", "processing", "Saving original HTML and CSS to S3")
             s3.put_object(Bucket=bucket, Key=f"{website_id}/index.html", Body=html, ContentType="text/html")
             s3.put_object(Bucket=bucket, Key=f"{website_id}/original-styles.css", Body=all_css, ContentType="text/css")
 
+            print("Saving metadata to DynamoDB")
             publish("saving_metadata", "processing", "Saving job metadata to DynamoDB")
             dynamodb.put_item(
                 TableName=table,
@@ -80,6 +68,7 @@ def lambda_handler(event, context):
                 },
             )
 
+            print("Queuing AI regeneration step")
             publish("queueing_ai", "processing", "Queuing AI regeneration step")
             sqs.send_message(
                 QueueUrl=queue_url,
@@ -93,7 +82,8 @@ def lambda_handler(event, context):
             )
 
         except Exception as e:
+            print(f"Error processing record {record['messageId']}: {e}")
             publish("failed", "failed", f"Crawler failed: {e}", error=str(e))
-            raise
+            failed_message_ids.append({"itemIdentifier": record["messageId"]})
 
-    return {"statusCode": 200}
+    return {"batchItemFailures": failed_message_ids}
