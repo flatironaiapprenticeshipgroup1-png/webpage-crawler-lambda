@@ -75,7 +75,7 @@ def lambda_handler(event, context):
             )
 
             print("Queuing AI regeneration step")
-            publish("queueing_ai", "processing", "Queuing AI regeneration step")
+            publish("queueing_ai", "processing", "Queuing AI regeneration")
             sqs.send_message(
                 QueueUrl=os.environ.get("SQS_QUEUE_URL"),
                 MessageGroupId=body["RegeneratedWebsiteId"],
