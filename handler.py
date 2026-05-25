@@ -53,14 +53,20 @@ def lambda_handler(event, context):
             all_css = external_css + "\n".join(css_info["inline_styles"])
 
             print("Creating HTML and CSS files")
-            publish("saving_original_assets", "processing", "Saving original HTML and CSS to S3")
-            s3.put_object(Bucket=bucket, Key=f"{website_id}/index.html", Body=html, ContentType="text/html")
-            s3.put_object(Bucket=bucket, Key=f"{website_id}/original-styles.css", Body=all_css, ContentType="text/css")
-
-            print("Saving metadata to DynamoDB")
-            publish("saving_metadata", "processing", "Saving job metadata to DynamoDB")
-            dynamodb.put_item(
-                TableName=table,
+            s3.put_object(
+                Bucket=bucket_name,
+                Key=f"{body['RegeneratedWebsiteId']}/index.html",
+                Body=files["html"],
+                ContentType="text/html"
+            )
+            s3.put_object(
+                Bucket=bucket_name,
+                Key=f"{body['RegeneratedWebsiteId']}/original-styles.css",
+                Body=files["css"],
+                ContentType="text/css"
+            )
+            ddb.put_item(
+                TableName=os.environ.get("DYNAMODB_TABLE_NAME"),
                 Item={
                     "RegeneratedWebsiteId": {"S": website_id},
                     "RegeneratedWebsiteUrl": {"S": url},
@@ -71,7 +77,9 @@ def lambda_handler(event, context):
             print("Queuing AI regeneration step")
             publish("queueing_ai", "processing", "Queuing AI regeneration step")
             sqs.send_message(
-                QueueUrl=queue_url,
+                QueueUrl=os.environ.get("SQS_QUEUE_URL"),
+                MessageGroupId=body["RegeneratedWebsiteId"],
+                MessageDeduplicationId=body["RegeneratedWebsiteId"],
                 MessageBody=json.dumps({
                     "RegeneratedWebsiteId": website_id,
                     "RegeneratedWebsiteUrl": url,
