@@ -53,6 +53,7 @@ def _get_dynamodb_client():
 
 def publish_status_update(
     website_id: str,
+    website_url: str,
     phase: str,
     step: str,
     status: str,
@@ -124,7 +125,10 @@ def publish_status_update(
 
     _get_dynamodb_client().update_item(
         TableName=os.environ["DYNAMODB_TABLE_NAME"],
-        Key={"RegeneratedWebsiteId": {"S": website_id}},
+        Key={
+            "RegeneratedWebsiteId": {"S": website_id},
+            "RegeneratedWebsiteUrl": {"S": website_url},
+        },
         UpdateExpression=update_expr,
         ExpressionAttributeValues=expr_vals,
     )

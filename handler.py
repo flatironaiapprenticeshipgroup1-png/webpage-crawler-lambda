@@ -1,5 +1,6 @@
 import json
 import os
+import uuid
 import boto3
 from crawler import crawl_website_html, extract_css, download_css_files
 from status_publisher import publish_status_update
@@ -25,6 +26,7 @@ def lambda_handler(event, context):
             seq += 1
             publish_status_update(
                 website_id=website_id,
+                website_url=url,
                 phase="crawler",
                 step=step,
                 status=status,
@@ -54,19 +56,19 @@ def lambda_handler(event, context):
 
             print("Creating HTML and CSS files")
             s3.put_object(
-                Bucket=bucket_name,
-                Key=f"{body['RegeneratedWebsiteId']}/index.html",
-                Body=files["html"],
+                Bucket=bucket,
+                Key=f"{website_id}/index.html",
+                Body=html,
                 ContentType="text/html"
             )
             s3.put_object(
-                Bucket=bucket_name,
-                Key=f"{body['RegeneratedWebsiteId']}/original-styles.css",
-                Body=files["css"],
+                Bucket=bucket,
+                Key=f"{website_id}/original-styles.css",
+                Body=all_css,
                 ContentType="text/css"
             )
-            ddb.put_item(
-                TableName=os.environ.get("DYNAMODB_TABLE_NAME"),
+            dynamodb.put_item(
+                TableName=table,
                 Item={
                     "RegeneratedWebsiteId": {"S": website_id},
                     "RegeneratedWebsiteUrl": {"S": url},
@@ -77,16 +79,14 @@ def lambda_handler(event, context):
             print("Queuing AI regeneration step")
             publish("queueing_ai", "processing", "Queuing AI regeneration")
             sqs.send_message(
-                QueueUrl=os.environ.get("SQS_QUEUE_URL"),
-                MessageGroupId=body["RegeneratedWebsiteId"],
-                MessageDeduplicationId=body["RegeneratedWebsiteId"],
+                QueueUrl=queue_url,
+                MessageGroupId=str(uuid.uuid4()),
+                MessageDeduplicationId=website_id,
                 MessageBody=json.dumps({
                     "RegeneratedWebsiteId": website_id,
                     "RegeneratedWebsiteUrl": url,
                     "RegenerationTheme": theme,
                 }),
-                MessageGroupId="website-regeneration",
-                MessageDeduplicationId=website_id,
             )
 
         except Exception as e:

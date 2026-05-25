@@ -2,6 +2,7 @@ import os
 os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "/ms-playwright"
 
 from playwright.sync_api import sync_playwright
+from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 import requests
 
