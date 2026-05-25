@@ -1,8 +1,10 @@
+import os
+os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "/ms-playwright"
+
 from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 import requests
-import os
 
 
 def crawl_website_and_generate_files(url: str):
@@ -26,11 +28,11 @@ def crawl_website_html(url: str):
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+            args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu", "--single-process", "--no-zygote"]
         )
         page = browser.new_page()
-        page.goto(url)
-        page.wait_for_load_state("networkidle")
+        page.goto(url, timeout=600000)
+        page.wait_for_load_state("domcontentloaded")
         html = page.content()
         print("Crawled content length:", len(html))
         browser.close()
@@ -39,7 +41,7 @@ def crawl_website_html(url: str):
 def extract_css(html: str, base_url: str):
     print("Extracting CSS from HTML...")
     soup = BeautifulSoup(html, "html.parser")
-    css_links = [urljoin(base_url, link["href"]) for link in soup.find_all("link", rel="stylesheet")]
+    css_links = [urljoin(base_url, link["href"]) for link in soup.find_all("link", rel="stylesheet") if link.get("href")]
     inline_styles = [style.string for style in soup.find_all("style")]
 
     return {"css_links": css_links, "inline_styles": inline_styles}

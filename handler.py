@@ -28,12 +28,14 @@ def lambda_handler(event, context):
             s3.put_object(
                 Bucket=bucket_name,
                 Key=f"{body['RegeneratedWebsiteId']}/index.html",
-                Body=files["html"]
+                Body=files["html"],
+                ContentType="text/html"
             )
             s3.put_object(
                 Bucket=bucket_name,
                 Key=f"{body['RegeneratedWebsiteId']}/original-styles.css",
-                Body=files["css"]
+                Body=files["css"],
+                ContentType="text/css"
             )
             ddb.put_item(
                 TableName=os.environ.get("DYNAMODB_TABLE_NAME"),
@@ -46,6 +48,7 @@ def lambda_handler(event, context):
             sqs.send_message(
                 QueueUrl=os.environ.get("SQS_QUEUE_URL"),
                 MessageGroupId=body["RegeneratedWebsiteId"],
+                MessageDeduplicationId=body["RegeneratedWebsiteId"],
                 MessageBody=json.dumps({
                     "RegeneratedWebsiteId": body["RegeneratedWebsiteId"],
                     "RegeneratedWebsiteUrl": body["RegeneratedWebsiteUrl"],
