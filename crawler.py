@@ -34,14 +34,39 @@ def crawl_website_html(url: str):
         page.goto(url, timeout=600000)
         page.wait_for_load_state("domcontentloaded")
         html = page.content()
-        print("Crawled content length:", len(html))
         browser.close()
+    print(f"Successfully crawled HTML ({len(html)} bytes)")
     return html
 
-def extract_css(html: str, base_url: str):
-    print("Extracting CSS from HTML...")
+
+def extract_css(html: str, base_url: str) -> dict:
+    print("Parsing HTML to extract CSS references")
     soup = BeautifulSoup(html, "html.parser")
     css_links = [urljoin(base_url, link["href"]) for link in soup.find_all("link", rel="stylesheet") if link.get("href")]
     inline_styles = [style.string for style in soup.find_all("style")]
 
     return {"css_links": css_links, "inline_styles": inline_styles}
+
+
+def download_css_files(css_links: list) -> str:
+    print(f"Downloading {len(css_links)} external CSS files")
+    combined = ""
+    for link in css_links:
+        try:
+            response = requests.get(link, timeout=10)
+            response.raise_for_status()
+            combined += response.text + "\n"
+            print(f"Downloaded CSS from {link} ({len(response.text)} bytes)")
+        except Exception as e:
+            print(f"Warning: could not download CSS from {link}: {e}")
+    return combined
+
+
+def crawl_website_and_generate_files(url: str) -> dict:
+    print(f"Starting full crawl workflow for {url}")
+    html = crawl_website_html(url)
+    css_info = extract_css(html, url)
+    external_css = download_css_files(css_info["css_links"])
+    all_css = external_css + "\n".join(css_info["inline_styles"])
+    print(f"Crawl complete: {len(html)} bytes HTML, {len(all_css)} bytes CSS")
+    return {"html": html, "css": all_css}
