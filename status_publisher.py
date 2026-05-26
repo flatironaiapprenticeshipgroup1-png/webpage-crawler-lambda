@@ -4,6 +4,7 @@ Status publisher module for real-time website crawler updates.
 This module provides functionality to publish status updates about webpage
 regeneration progress to Ably channels and persist status to DynamoDB.
 """
+import asyncio
 import json
 import os
 from datetime import datetime, timezone
@@ -100,7 +101,7 @@ def publish_status_update(
     }
 
     channel = _get_ably_client().channels.get(f"regeneration:{website_id}")
-    channel.publish("regeneration-status", payload)
+    asyncio.run(channel.publish("regeneration-status", payload))
 
     update_expr = (
         "SET CurrentPhase = :phase, CurrentStep = :step, "
