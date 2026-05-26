@@ -78,7 +78,8 @@ def lambda_handler(event, context):
 
             print("Queuing AI regeneration step")
             publish("queueing_ai", "processing", "Queuing AI regeneration")
-            sqs.send_message(
+
+            print(sqs.send_message(
                 QueueUrl=queue_url,
                 MessageGroupId=str(uuid.uuid4()),
                 MessageDeduplicationId=website_id,
@@ -87,7 +88,8 @@ def lambda_handler(event, context):
                     "RegeneratedWebsiteUrl": url,
                     "RegenerationTheme": theme,
                 }),
-            )
+            ))
+            
 
         except Exception as e:
             print(f"Error processing record {record['messageId']}: {e}")
