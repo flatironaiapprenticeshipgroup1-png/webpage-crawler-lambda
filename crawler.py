@@ -62,11 +62,3 @@ def download_css_files(css_links: list) -> str:
     return combined
 
 
-def crawl_website_and_generate_files(url: str) -> dict:
-    print(f"Starting full crawl workflow for {url}")
-    html = crawl_website_html(url)
-    css_info = extract_css(html, url)
-    external_css = download_css_files(css_info["css_links"])
-    all_css = external_css + "\n".join(css_info["inline_styles"])
-    print(f"Crawl complete: {len(html)} bytes HTML, {len(all_css)} bytes CSS")
-    return {"html": html, "css": all_css}
