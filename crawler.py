@@ -33,6 +33,21 @@ def extract_css(html: str, base_url: str) -> dict:
     return {"css_links": css_links, "inline_styles": inline_styles}
 
 
+
+def rewrite_html_for_regenerated_styles(html: str) -> str:
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup.find_all("link", rel="stylesheet"):
+        tag.decompose()
+    for tag in soup.find_all("style"):
+        tag.decompose()
+    head = soup.find("head")
+    if head is None:
+        head = soup.new_tag("head")
+        soup.insert(0, head)
+    head.insert(0, soup.new_tag("link", rel="stylesheet", href="Regenerated-Styles.css"))
+    return str(soup)
+
+
 def download_css_files(css_links: list) -> str:
     print(f"Downloading {len(css_links)} external CSS files")
     combined = ""
