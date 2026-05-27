@@ -24,7 +24,7 @@ jobs:
 
       - name: Build, tag, and push image to ECR
         run: |
-          docker build -t webpage-crawler-lambda .
+          docker build --platform linux/amd64 -t webpage-crawler-lambda .
           docker tag webpage-crawler-lambda:latest 950119649814.dkr.ecr.us-east-1.amazonaws.com/webpage-crawler-lambda:latest
           docker push 950119649814.dkr.ecr.us-east-1.amazonaws.com/webpage-crawler-lambda:latest
 
