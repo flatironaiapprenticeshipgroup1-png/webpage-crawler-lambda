@@ -2,7 +2,7 @@ import json
 import os
 import uuid
 import boto3
-from crawler import crawl_website_html, extract_css, download_css_files, rewrite_html_for_regenerated_styles
+from crawler import crawl_website_html, extract_css, download_css_files
 from status_publisher import publish_status_update
 
 s3 = boto3.client("s3")
@@ -54,13 +54,11 @@ def lambda_handler(event, context):
             external_css = download_css_files(css_info["css_links"])
             all_css = external_css + "\n".join(css_info["inline_styles"])
 
-            rewritten_html = rewrite_html_for_regenerated_styles(html)
-
             print("Creating HTML and CSS files")
             s3.put_object(
                 Bucket=bucket,
                 Key=f"{website_id}/index.html",
-                Body=rewritten_html,
+                Body=html,
                 ContentType="text/html"
             )
             s3.put_object(
