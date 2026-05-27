@@ -54,7 +54,9 @@ def lambda_handler(event, context):
             external_css = download_css_files(css_info["css_links"])
             all_css = external_css + "\n".join(css_info["inline_styles"])
 
+            # Publish before S3 writes so the frontend shows progress during upload
             print("Creating HTML and CSS files")
+            publish("saving_original_assets", "processing", "Saving HTML and CSS to S3")
             s3.put_object(
                 Bucket=bucket,
                 Key=f"{website_id}/index.html",
@@ -67,6 +69,9 @@ def lambda_handler(event, context):
                 Body=all_css,
                 ContentType="text/css"
             )
+
+            # Publish before DynamoDB write so the frontend shows progress during persistence
+            publish("saving_metadata", "processing", "Saving job metadata to database")
             dynamodb.put_item(
                 TableName=table,
                 Item={

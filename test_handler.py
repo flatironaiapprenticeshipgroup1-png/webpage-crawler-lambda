@@ -15,7 +15,7 @@ external dependencies (Ably, crawler functions).
 import json
 import os
 import sys
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # Set env vars before importing handler
 os.environ["S3_BUCKET_NAME"] = "test-bucket"
@@ -38,11 +38,16 @@ def make_event(website_id=WEBSITE_ID, url=URL, theme=THEME):
         theme: Theme for regeneration (default: "dark")
 
     Returns:
-        dict: SQS event with a single record containing the regeneration request
+        dict: SQS event with a single record containing the regeneration request.
+              messageId is included to match real SQS record shape used in
+              batchItemFailures on error.
     """
     return {
         "Records": [
             {
+                # messageId is required: handler appends {"itemIdentifier": record["messageId"]}
+                # to batchItemFailures when a record fails processing.
+                "messageId": "test-message-id-123",
                 "body": json.dumps({
                     "RegeneratedWebsiteId": website_id,
                     "RegeneratedWebsiteUrl": url,
@@ -59,10 +64,14 @@ def make_mocks():
 
     Sets up mock objects for:
     - S3 client: For HTML/CSS storage
-    - DynamoDB client: For job metadata storage
+    - DynamoDB client: For job metadata storage and status updates
     - SQS client: For AI regeneration queue
     - Secrets Manager: For Ably API key retrieval
     - Ably REST client: For real-time status publishing
+
+    Note: mock_ably_channel.publish is an AsyncMock because ably-python >= 2.0.0
+    makes channel.publish() a coroutine. status_publisher wraps it with
+    asyncio.run(), which requires the mock to return an awaitable.
 
     Returns:
         tuple: (mock_s3, mock_dynamodb, mock_sqs, mock_ably_channel,
@@ -86,6 +95,9 @@ def make_mocks():
         }[service]
 
     mock_ably_channel = MagicMock()
+    # AsyncMock required: status_publisher calls asyncio.run(channel.publish(...))
+    # which needs the return value to be an awaitable coroutine, not a plain MagicMock.
+    mock_ably_channel.publish = AsyncMock()
     mock_ably_rest = MagicMock()
     mock_ably_rest.channels.get.return_value = mock_ably_channel
 
@@ -97,30 +109,33 @@ def test_happy_path_publishes_all_steps_in_order():
     Test the handler successfully processes a website crawl request.
 
     Verifies:
-    1. Handler returns 200 status code
+    1. Handler returns empty batchItemFailures (SQS Lambda batch success contract)
     2. All expected processing steps are published in correct order:
        received -> crawling_html -> extracting_css -> saving_original_assets
        -> saving_metadata -> queueing_ai
     3. Sequence numbers increase monotonically from 1 to N
     4. All status updates have "processing" status
-    5. Correct number of S3, DynamoDB, and SQS operations are performed
+    5. Correct number of S3, DynamoDB put_item, and SQS operations are performed
     """
     mock_s3, mock_dynamodb, mock_sqs, mock_channel, mock_ably_rest, boto3_factory = make_mocks()
 
+    # All patches AND the handler call must be inside the same with-block so that
+    # status_publisher's lazy boto3/Ably singletons are initialised with mocks.
     with patch("boto3.client", side_effect=boto3_factory), \
          patch("ably.AblyRest", return_value=mock_ably_rest), \
          patch("crawler.crawl_website_html", return_value="<html></html>"), \
          patch("crawler.extract_css", return_value={"css_links": [], "inline_styles": ["body{}"]}), \
          patch("crawler.download_css_files", return_value=""):
 
-        # Re-import to pick up patches
+        # Re-import to pick up patches (clears any cached module-level singletons)
         if "handler" in sys.modules: del sys.modules["handler"]
         if "status_publisher" in sys.modules: del sys.modules["status_publisher"]
         import handler
 
-        result = handler.handler(make_event(), {})
+        result = handler.lambda_handler(make_event(), {})
 
-    assert result["statusCode"] == 200
+    # Lambda SQS batch contract: return batchItemFailures, not statusCode
+    assert result == {"batchItemFailures": []}, f"Unexpected result: {result}"
 
     published_calls = mock_channel.publish.call_args_list
     steps = [c.args[1]["step"] for c in published_calls]
@@ -140,6 +155,7 @@ def test_happy_path_publishes_all_steps_in_order():
     assert all(s == "processing" for s in statuses)
 
     assert mock_s3.put_object.call_count == 2
+    # put_item is only the job-metadata write; status updates use update_item
     assert mock_dynamodb.put_item.call_count == 1
     assert mock_sqs.send_message.call_count == 1
     print("test_happy_path_publishes_all_steps_in_order: PASSED")
@@ -150,9 +166,8 @@ def test_crawl_failure_publishes_failed():
     Test the handler publishes failure status when HTML crawling fails.
 
     Verifies:
-    1. When crawl_website_html raises an exception, handler propagates it
-    2. "failed" step is published before the exception propagates
-    3. Failed event has status="failed" and includes error message
+    1. Handler returns batchItemFailures containing the failed record's messageId
+    2. "failed" step is published with status="failed" and a non-None error field
     """
     mock_s3, mock_dynamodb, mock_sqs, mock_channel, mock_ably_rest, boto3_factory = make_mocks()
 
@@ -164,15 +179,16 @@ def test_crawl_failure_publishes_failed():
         if "status_publisher" in sys.modules: del sys.modules["status_publisher"]
         import handler
 
-        try:
-            handler.handler(make_event(), {})
-            assert False, "Should have raised"
-        except Exception:
-            pass
+        result = handler.lambda_handler(make_event(), {})
+
+    # Failed records must be reported via batchItemFailures (SQS partial-batch retry)
+    assert result["batchItemFailures"] == [{"itemIdentifier": "test-message-id-123"}], \
+        f"Unexpected batchItemFailures: {result['batchItemFailures']}"
 
     steps = [c.args[1]["step"] for c in mock_channel.publish.call_args_list]
-    assert "failed" in steps
-    failed_event = next(c.args[1] for c in mock_channel.publish.call_args_list if c.args[1]["step"] == "failed")
+    assert "failed" in steps, f"Expected 'failed' step, got: {steps}"
+    failed_event = next(c.args[1] for c in mock_channel.publish.call_args_list
+                        if c.args[1]["step"] == "failed")
     assert failed_event["status"] == "failed"
     assert failed_event["error"] is not None
     print("test_crawl_failure_publishes_failed: PASSED")
@@ -183,8 +199,8 @@ def test_s3_failure_publishes_failed():
     Test the handler publishes failure status when S3 operations fail.
 
     Verifies:
-    1. When S3 put_object raises an exception, handler propagates it
-    2. "failed" step is published before the exception propagates
+    1. Handler returns batchItemFailures for the failed record
+    2. "failed" step is published even when S3 raises an exception
     3. Failure occurs after HTML crawl and CSS extraction succeed
     """
     mock_s3, mock_dynamodb, mock_sqs, mock_channel, mock_ably_rest, boto3_factory = make_mocks()
@@ -200,14 +216,11 @@ def test_s3_failure_publishes_failed():
         if "status_publisher" in sys.modules: del sys.modules["status_publisher"]
         import handler
 
-        try:
-            handler.handler(make_event(), {})
-            assert False, "Should have raised"
-        except Exception:
-            pass
+        result = handler.lambda_handler(make_event(), {})
 
+    assert result["batchItemFailures"] == [{"itemIdentifier": "test-message-id-123"}]
     steps = [c.args[1]["step"] for c in mock_channel.publish.call_args_list]
-    assert "failed" in steps
+    assert "failed" in steps, f"Expected 'failed' step, got: {steps}"
     print("test_s3_failure_publishes_failed: PASSED")
 
 
@@ -231,10 +244,11 @@ def test_sequence_numbers_always_increase():
         if "handler" in sys.modules: del sys.modules["handler"]
         if "status_publisher" in sys.modules: del sys.modules["status_publisher"]
         import handler
-        handler.handler(make_event(), {})
+        handler.lambda_handler(make_event(), {})
 
     seqs = [c.args[1]["sequence"] for c in mock_channel.publish.call_args_list]
-    assert seqs == sorted(seqs) and len(seqs) == len(set(seqs))
+    assert seqs == sorted(seqs) and len(seqs) == len(set(seqs)), \
+        f"Sequences not strictly increasing: {seqs}"
     print("test_sequence_numbers_always_increase: PASSED")
 
 
