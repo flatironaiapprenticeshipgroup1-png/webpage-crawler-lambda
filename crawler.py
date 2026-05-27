@@ -28,7 +28,7 @@ def extract_css(html: str, base_url: str) -> dict:
     print("Parsing HTML to extract CSS references")
     soup = BeautifulSoup(html, "html.parser")
     css_links = [urljoin(base_url, link["href"]) for link in soup.find_all("link", rel="stylesheet") if link.get("href")]
-    inline_styles = [style.string for style in soup.find_all("style")]
+    inline_styles = [style.get_text() for style in soup.find_all("style")]
 
     return {"css_links": css_links, "inline_styles": inline_styles}
 
