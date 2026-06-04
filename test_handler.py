@@ -129,7 +129,9 @@ def test_happy_path_publishes_all_steps_in_order():
     ), patch(
         "crawler.download_css_files", return_value=""
     ), patch(
-        "crawler.rewrite_html_for_regenerated_styles", return_value="<html></html>"
+        "crawler.rewrite_html_for_regenerated_styles",
+        return_value="<html></html>",
+        create=True,
     ):
 
         # Re-import to pick up patches
@@ -225,7 +227,9 @@ def test_s3_failure_publishes_failed():
     ), patch(
         "crawler.download_css_files", return_value=""
     ), patch(
-        "crawler.rewrite_html_for_regenerated_styles", return_value="<html></html>"
+        "crawler.rewrite_html_for_regenerated_styles",
+        return_value="<html></html>",
+        create=True,
     ):
 
         if "handler" in sys.modules:
@@ -262,7 +266,9 @@ def test_sequence_numbers_always_increase():
     ), patch(
         "crawler.download_css_files", return_value=""
     ), patch(
-        "crawler.rewrite_html_for_regenerated_styles", return_value="<html></html>"
+        "crawler.rewrite_html_for_regenerated_styles",
+        return_value="<html></html>",
+        create=True,
     ):
 
         if "handler" in sys.modules:
