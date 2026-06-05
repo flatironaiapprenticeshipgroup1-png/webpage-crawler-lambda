@@ -31,17 +31,6 @@ THEME = "dark"
 
 
 def make_event(website_id=WEBSITE_ID, url=URL, theme=THEME):
-    """
-    Create a test SQS event with website regeneration request.
-
-    Args:
-        website_id: Website identifier (default: "abc-123")
-        url: Website URL to crawl (default: "https://example.com")
-        theme: Theme for regeneration (default: "dark")
-
-    Returns:
-        dict: SQS event with a single record containing the regeneration request
-    """
     return {
         "Records": [
             {
@@ -59,30 +48,15 @@ def make_event(website_id=WEBSITE_ID, url=URL, theme=THEME):
 
 
 def make_mocks():
-    """
-    Create mocked AWS service clients and Ably objects.
-
-    Sets up mock objects for:
-    - S3 client: For HTML/CSS storage
-    - DynamoDB client: For job metadata storage
-    - SQS client: For AI regeneration queue
-    - Secrets Manager: For Ably API key retrieval
-    - Ably REST client: For real-time status publishing
-
-    Returns:
-        tuple: (mock_s3, mock_dynamodb, mock_sqs, mock_ably_channel,
-                mock_ably_rest, boto3_client_factory)
-    """
     mock_s3 = MagicMock()
     mock_dynamodb = MagicMock()
     mock_sqs = MagicMock()
     mock_secrets = MagicMock()
     mock_secrets.get_secret_value.return_value = {
-        "SecretString": json.dumps({"AblyApiKey": "fake-key", "OpenAIAPIKey": "fake-openai-key"})
+        "SecretString": json.dumps({"AblyApiKey": "fake-key"})
     }
 
     def boto3_client_factory(service, **kwargs):
-        """Factory function to return mocked boto3 clients by service name."""
         return {
             "s3": mock_s3,
             "dynamodb": mock_dynamodb,
@@ -110,10 +84,9 @@ def test_happy_path_publishes_all_steps_in_order():
     Test the handler successfully processes a website crawl request.
 
     Verifies:
-    1. Handler returns 200 status code
+    1. Handler returns no batch failures
     2. All expected processing steps are published in correct order:
-       received -> crawling_html -> extracting_css -> saving_original_assets
-       -> saving_metadata -> queueing_ai
+       received -> crawling_html -> extracting_css -> queueing_ai
     3. Sequence numbers increase monotonically from 1 to N
     4. All status updates have "processing" status
     5. Correct number of S3, DynamoDB, and SQS operations are performed
@@ -129,11 +102,8 @@ def test_happy_path_publishes_all_steps_in_order():
         return_value={"css_links": [], "inline_styles": ["body{}"]},
     ), patch(
         "crawler.download_css_files", return_value=""
-    ), patch(
-        "html_regenerator.regenerate_html", return_value="<html></html>"
     ):
 
-        # Re-import to pick up patches
         if "handler" in sys.modules:
             del sys.modules["handler"]
         if "status_publisher" in sys.modules:
@@ -150,7 +120,6 @@ def test_happy_path_publishes_all_steps_in_order():
         "received",
         "crawling_html",
         "extracting_css",
-        "regenerating_html",
         "queueing_ai",
     ], f"Unexpected steps: {steps}"
 
@@ -162,7 +131,7 @@ def test_happy_path_publishes_all_steps_in_order():
     statuses = [c.args[1]["status"] for c in published_calls]
     assert all(s == "processing" for s in statuses)
 
-    assert mock_s3.put_object.call_count == 3  # index.html, original-styles.css, Regenerated-Index.html
+    assert mock_s3.put_object.call_count == 2  # index.html, original-styles.css
     assert mock_dynamodb.put_item.call_count == 1
     assert mock_sqs.send_message.call_count == 1
     print("test_happy_path_publishes_all_steps_in_order: PASSED")
@@ -171,11 +140,6 @@ def test_happy_path_publishes_all_steps_in_order():
 def test_crawl_failure_publishes_failed():
     """
     Test the handler publishes failure status when HTML crawling fails.
-
-    Verifies:
-    1. When crawl_website_html raises an exception, handler propagates it
-    2. "failed" step is published before the exception propagates
-    3. Failed event has status="failed" and includes error message
     """
     mock_s3, mock_dynamodb, mock_sqs, mock_channel, mock_ably_rest, boto3_factory = (
         make_mocks()
@@ -209,11 +173,6 @@ def test_crawl_failure_publishes_failed():
 def test_s3_failure_publishes_failed():
     """
     Test the handler publishes failure status when S3 operations fail.
-
-    Verifies:
-    1. When S3 put_object raises an exception, handler propagates it
-    2. "failed" step is published before the exception propagates
-    3. Failure occurs after HTML crawl and CSS extraction succeed
     """
     mock_s3, mock_dynamodb, mock_sqs, mock_channel, mock_ably_rest, boto3_factory = (
         make_mocks()
@@ -245,11 +204,6 @@ def test_s3_failure_publishes_failed():
 def test_sequence_numbers_always_increase():
     """
     Test that sequence numbers monotonically increase across all updates.
-
-    Verifies:
-    1. Sequence numbers are strictly increasing (no duplicates)
-    2. Sequence numbers are sorted in published order
-    3. Critical for clients to maintain proper ordering of async updates
     """
     mock_s3, mock_dynamodb, mock_sqs, mock_channel, mock_ably_rest, boto3_factory = (
         make_mocks()
@@ -261,8 +215,6 @@ def test_sequence_numbers_always_increase():
         "crawler.extract_css", return_value={"css_links": [], "inline_styles": []}
     ), patch(
         "crawler.download_css_files", return_value=""
-    ), patch(
-        "html_regenerator.regenerate_html", return_value="<html></html>"
     ):
 
         if "handler" in sys.modules:

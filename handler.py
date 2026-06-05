@@ -5,10 +5,8 @@ import threading
 import uuid
 
 import boto3
-from openai import OpenAI
 
 from crawler import crawl_website_html, extract_css, download_css_files
-from html_regenerator import regenerate_html
 from status_publisher import publish_status_update
 
 logging.getLogger().setLevel(logging.INFO)
@@ -54,11 +52,6 @@ def lambda_handler(event, context):
             table = os.environ["DYNAMODB_TABLE_NAME"]
             queue_url = os.environ["SQS_QUEUE_URL"]
 
-            secret = json.loads(
-                secrets_client.get_secret_value(SecretId=os.environ["SECRET_NAME"])["SecretString"]
-            )
-            openai_client = OpenAI(api_key=secret["OpenAIAPIKey"])
-
             print(f"Processing job {website_id} for {url}")
             publish("received", "processing", "Regeneration request received")
 
@@ -67,12 +60,12 @@ def lambda_handler(event, context):
             html = crawl_website_html(url)
 
             print("Extracting CSS")
-            publish("extracting_css", "processing", "Extracting CSS references")
+            publish("extracting_css", "processing", "Extracting CSS from the website")
             css_info = extract_css(html, url)
             external_css = download_css_files(css_info["css_links"])
             all_css = external_css + "\n".join(css_info["inline_styles"])
 
-            print("Creating HTML and CSS files")
+            print("Saving original HTML and CSS to S3")
             s3.put_object(Bucket=bucket, Key=f"{website_id}/index.html", Body=html, ContentType="text/html")
             s3.put_object(Bucket=bucket, Key=f"{website_id}/original-styles.css", Body=all_css, ContentType="text/css")
             dynamodb.put_item(
@@ -84,29 +77,8 @@ def lambda_handler(event, context):
                 },
             )
 
-            print("Regenerating HTML")
-            publish("regenerating_html", "processing", "AI regenerating HTML structure")
-
-            def on_chunk_complete(chunk_index, total_chunks):
-                publish(
-                    "regenerating_html_chunks_completed",
-                    "processing",
-                    f"Regenerated HTML chunk {chunk_index + 1} of {total_chunks}",
-                )
-
-            regenerated_html = regenerate_html(openai_client, html, theme, on_chunk_complete)
-
-            s3.put_object(
-                Bucket=bucket,
-                Key=f"{website_id}/Regenerated-Index.html",
-                Body=regenerated_html.encode("utf-8"),
-                ContentType="text/html",
-                CacheControl="no-store, no-cache, must-revalidate",
-            )
-            logger.info("Regenerated HTML saved to S3 for website ID %s", website_id)
-
             print("Queuing AI regeneration step")
-            publish("queueing_ai", "processing", "Queuing AI regeneration")
+            publish("queueing_ai", "processing", "Queuing AI to regenerate HTML and CSS together")
             sqs.send_message(
                 QueueUrl=queue_url,
                 MessageGroupId=str(uuid.uuid4()),
