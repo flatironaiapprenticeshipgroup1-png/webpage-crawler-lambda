@@ -77,13 +77,31 @@ def _regenerate_chunk(
         )
     else:
         system_msg = (
-            f"You are an HTML transformation expert for a website theme regeneration system.\n\n"
-            f"You will receive an HTML fragment (a section of <body>) for theme: {theme}\n\n"
+            f"You are an HTML and web design expert specializing in dramatic visual transformations.\n\n"
+            f"You will receive an HTML fragment. Completely rewrite it to match the theme: {theme}\n\n"
+            f"You MUST change ALL of the following:\n\n"
+            f"LAYOUT & STRUCTURE:\n"
+            f"Redesign the layout entirely — change the arrangement of sections, use different HTML elements,\n"
+            f"Add theme-appropriate structural elements (hero sections, cards, grids, overlays, etc.),\n"
+            f"Restructure the hierarchy dramatically so it looks nothing like the original\n\n"
+            f"SEMANTIC MARKUP:\n"
+            f"Replace generic divs with semantic elements where appropriate (<section>, <article>, <header>, <nav>, etc.),\n"
+            f"Add theme-appropriate attributes and ARIA labels\n\n"
+            f"CLASS NAMES & IDs:\n"
+            f"You MAY rewrite class names to be theme-appropriate,\n"
+            f"Preserve any class names that are critical for functionality (e.g. nav toggles, modals)\n\n"
+            f"CONTENT:\n"
+            f"You MAY rewrite headings, labels, and microcopy to fit the theme's tone and vocabulary,\n"
+            f"Preserve core factual content (product names, prices, data)\n\n"
+            f"THEME ELEMENTS:\n"
+            f"Add decorative HTML elements that match the theme\n"
+            f"(e.g. cyberpunk: scanline overlays, glitch spans; nature: leaf/wave decorations; retro: CRT frames)\n\n"
+            f"also add dramatic decorative elements in the body to make the website more visually engaging\n\n"
+            f"IT IS VERY IMPORTANT THAT THE RESULT LOOKS COMPLETELY DIFFERENT FROM THE ORIGINAL\n\n"
             f"RULES:\n"
-            f"- Keep ALL existing HTML structure, class names, IDs, text content, and images exactly as-is\n"
-            f"- Do NOT add inline style attributes — the CSS is already regenerated with the theme\n"
-            f"- Do NOT remove any existing HTML elements\n"
-            f"Return ONLY valid HTML — no explanations, no markdown, no code fences."
+            f"Do NOT add inline style attributes — the CSS handles all visual styling,\n"
+            f"Return ONLY valid HTML — no explanations, no markdown, no code fences,\n"
+            f"Do not include <head>, <html>, or <body> wrapper tags"
         )
 
     user_msg = (
