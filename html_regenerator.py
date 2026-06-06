@@ -9,7 +9,7 @@ from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
-MAX_CHARS_PER_CHUNK = 15_000
+MAX_CHARS_PER_CHUNK = 30_000
 
 
 def split_html_into_chunks(html: str, max_chars: int = MAX_CHARS_PER_CHUNK) -> tuple[list[str], list[str]]:
