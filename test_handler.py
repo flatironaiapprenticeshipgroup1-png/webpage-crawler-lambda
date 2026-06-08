@@ -74,6 +74,7 @@ def make_mocks():
     """
     mock_s3 = MagicMock()
     mock_dynamodb = MagicMock()
+    mock_dynamodb.get_item.return_value = {}
     mock_sqs = MagicMock()
     mock_secrets = MagicMock()
     mock_secrets.get_secret_value.return_value = {
@@ -284,9 +285,61 @@ def test_sequence_numbers_always_increase():
     print("test_sequence_numbers_always_increase: PASSED")
 
 
+def test_retry_continues_sequence_from_existing():
+    """
+    Verify that a retry on the same RegeneratedWebsiteId continues sequence
+    numbers from the existing CurrentSequence in DynamoDB rather than restarting
+    at 1, so the frontend's sequence deduplication does not discard retry events.
+    """
+    mock_s3, mock_dynamodb, mock_sqs, mock_channel, mock_ably_rest, boto3_factory = (
+        make_mocks()
+    )
+
+    PRIOR_SEQ = 5
+    mock_dynamodb.get_item.return_value = {
+        "Item": {
+            "RegeneratedWebsiteId": {"S": WEBSITE_ID},
+            "RegeneratedWebsiteUrl": {"S": URL},
+            "CurrentSequence": {"N": str(PRIOR_SEQ)},
+        }
+    }
+
+    with patch("boto3.client", side_effect=boto3_factory), patch(
+        "ably.AblyRest", return_value=mock_ably_rest
+    ), patch("crawler.crawl_website_html", return_value="<html></html>"), patch(
+        "crawler.extract_css",
+        return_value={"css_links": [], "inline_styles": ["body{}"]},
+    ), patch(
+        "crawler.download_css_files", return_value=""
+    ), patch(
+        "crawler.rewrite_html_for_regenerated_styles",
+        return_value="<html></html>",
+        create=True,
+    ):
+
+        if "handler" in sys.modules:
+            del sys.modules["handler"]
+        if "status_publisher" in sys.modules:
+            del sys.modules["status_publisher"]
+        import handler
+
+        result = handler.lambda_handler(make_event(), {})
+
+    assert result == {"batchItemFailures": []}
+
+    seqs = [c.args[1]["sequence"] for c in mock_channel.publish.call_args_list]
+
+    assert seqs[0] == PRIOR_SEQ + 1, f"First seq should be {PRIOR_SEQ + 1}, got {seqs[0]}"
+    assert all(s > PRIOR_SEQ for s in seqs), f"All seqs must be > {PRIOR_SEQ}: {seqs}"
+    assert seqs == sorted(seqs) and len(seqs) == len(set(seqs)), "Sequences not strictly increasing"
+
+    print("test_retry_continues_sequence_from_existing: PASSED")
+
+
 if __name__ == "__main__":
     test_happy_path_publishes_all_steps_in_order()
     test_crawl_failure_publishes_failed()
     test_s3_failure_publishes_failed()
     test_sequence_numbers_always_increase()
+    test_retry_continues_sequence_from_existing()
     print("All tests passed.")
