@@ -3,7 +3,7 @@ import os
 import uuid
 import boto3
 from crawler import crawl_website_html, extract_css, download_css_files
-from status_publisher import publish_status_update
+from status_publisher import get_current_sequence, publish_status_update
 
 s3 = boto3.client("s3")
 dynamodb = boto3.client("dynamodb")
@@ -19,7 +19,7 @@ def lambda_handler(event, context):
         url = body["RegeneratedWebsiteUrl"]
         theme = body.get("RegenerationTheme", "")
 
-        seq = 0
+        seq = get_current_sequence(website_id, url)
 
         def publish(step, status, message, result_url=None, error=None):
             nonlocal seq

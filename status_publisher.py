@@ -52,6 +52,24 @@ def _get_dynamodb_client():
     return _dynamodb_client
 
 
+def get_current_sequence(website_id: str, website_url: str) -> int:
+    """Read the latest persisted sequence number for this website from DynamoDB. Falls back to 0."""
+    try:
+        response = _get_dynamodb_client().get_item(
+            TableName=os.environ["DYNAMODB_TABLE_NAME"],
+            Key={
+                "RegeneratedWebsiteId": {"S": website_id},
+                "RegeneratedWebsiteUrl": {"S": website_url},
+            },
+            ProjectionExpression="CurrentSequence",
+        )
+        item = response.get("Item", {})
+        return int(item.get("CurrentSequence", {}).get("N", "0"))
+    except Exception as exc:
+        print(f"[status_publisher] WARNING: could not read CurrentSequence for {website_id}: {exc}. Starting from 0.")
+        return 0
+
+
 def publish_status_update(
     website_id: str,
     website_url: str,
@@ -123,6 +141,8 @@ def publish_status_update(
     if error is not None:
         update_expr += ", ErrorMessage = :error"
         expr_vals[":error"] = {"S": error}
+    else:
+        update_expr += " REMOVE ErrorMessage"
 
     _get_dynamodb_client().update_item(
         TableName=os.environ["DYNAMODB_TABLE_NAME"],
