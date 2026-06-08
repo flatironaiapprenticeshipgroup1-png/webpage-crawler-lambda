@@ -306,9 +306,8 @@ def test_retry_continues_sequence_from_existing():
     ), patch(
         "crawler.download_css_files", return_value=""
     ), patch(
-        "crawler.rewrite_html_for_regenerated_styles",
+        "html_regenerator.regenerate_html",
         return_value="<html></html>",
-        create=True,
     ):
 
         if "handler" in sys.modules:

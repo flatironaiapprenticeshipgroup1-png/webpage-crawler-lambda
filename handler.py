@@ -7,6 +7,7 @@ import uuid
 import boto3
 from openai import OpenAI
 
+import html_regenerator
 from crawler import crawl_website_html, extract_css, download_css_files
 
 from status_publisher import get_current_sequence, publish_status_update
@@ -95,7 +96,7 @@ def lambda_handler(event, context):
                     f"Regenerated HTML chunk {chunk_index + 1} of {total_chunks}",
                 )
 
-            regenerated_html = regenerate_html(openai_client, html, theme, on_chunk_complete)
+            regenerated_html = html_regenerator.regenerate_html(openai_client, html, theme, on_chunk_complete)
 
             s3.put_object(
                 Bucket=bucket,
