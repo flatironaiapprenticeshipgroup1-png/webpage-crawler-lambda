@@ -31,6 +31,7 @@ def lambda_handler(event, context):
         theme = body.get("RegenerationTheme", "")
 
         seq = get_current_sequence(website_id, url)
+        seq_lock = threading.Lock()
 
         def publish(step, status, message, result_url=None, error=None):
             nonlocal seq
