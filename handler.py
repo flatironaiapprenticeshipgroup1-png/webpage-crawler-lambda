@@ -7,9 +7,11 @@ import uuid
 import boto3
 from openai import OpenAI
 
+import html_regenerator
 from crawler import crawl_website_html, extract_css, download_css_files
-from html_regenerator import regenerate_html
-from status_publisher import publish_status_update
+
+from status_publisher import get_current_sequence, publish_status_update
+
 
 logging.getLogger().setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
@@ -29,7 +31,7 @@ def lambda_handler(event, context):
         url = body["RegeneratedWebsiteUrl"]
         theme = body.get("RegenerationTheme", "")
 
-        seq = 0
+        seq = get_current_sequence(website_id, url)
         seq_lock = threading.Lock()
 
         def publish(step, status, message, result_url=None, error=None):
@@ -94,7 +96,7 @@ def lambda_handler(event, context):
                     f"Regenerated HTML chunk {chunk_index + 1} of {total_chunks}",
                 )
 
-            regenerated_html = regenerate_html(openai_client, html, theme, on_chunk_complete)
+            regenerated_html = html_regenerator.regenerate_html(openai_client, html, theme, on_chunk_complete)
 
             s3.put_object(
                 Bucket=bucket,
