@@ -164,6 +164,8 @@ def _regenerate_chunk(
             f"restrained where it doesn't. Avoid anything clunky, chaotic, or generic.\n\n"
             f"You may use inline styles for layout only (flex, grid, position, width, height, gap, margin, padding). "
             f"Do not use inline styles for visual properties (colors, fonts, borders, shadows, backgrounds) — those are handled by CSS.\n\n"
+            f"IMPORTANT: Preserve all existing class names and id attributes exactly as they are. "
+            f"The CSS is generated separately and targets those selectors — if you rename them, the styling breaks.\n\n"
             f"Preserve all factual content (product names, prices, key data). "
             f"Preserve all emojis and special Unicode characters exactly as they appear — do not convert them to HTML entities. "
             f"Return ONLY valid HTML. No explanations, no markdown, no code fences, no <html>/<head>/<body> tags."
