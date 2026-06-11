@@ -13,7 +13,6 @@ import boto3
 from ably import AblyRest
 
 _secrets_client = None
-_ably_client = None
 _dynamodb_client = None
 _ably_api_key = None
 
@@ -34,14 +33,6 @@ def _get_ably_api_key():
         response = _get_secrets_client().get_secret_value(SecretId=secret_name)
         _ably_api_key = json.loads(response["SecretString"])["AblyApiKey"]
     return _ably_api_key
-
-
-def _get_ably_client():
-    """Get or initialize the Ably REST client."""
-    global _ably_client
-    if _ably_client is None:
-        _ably_client = AblyRest(key=_get_ably_api_key())
-    return _ably_client
 
 
 def _get_dynamodb_client():
@@ -118,7 +109,7 @@ def publish_status_update(
         "error": error,
     }
 
-    channel = _get_ably_client().channels.get(f"regeneration:{website_id}")
+    channel = AblyRest(key=_get_ably_api_key()).channels.get(f"regeneration:{website_id}")
     asyncio.run(channel.publish("regeneration-status", payload))
 
     update_expr = (
