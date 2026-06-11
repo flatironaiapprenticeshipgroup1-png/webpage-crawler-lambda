@@ -1,3 +1,4 @@
+import html as html_lib
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -164,6 +165,7 @@ def _regenerate_chunk(
             f"You may use inline styles for layout only (flex, grid, position, width, height, gap, margin, padding). "
             f"Do not use inline styles for visual properties (colors, fonts, borders, shadows, backgrounds) — those are handled by CSS.\n\n"
             f"Preserve all factual content (product names, prices, key data). "
+            f"Preserve all emojis and special Unicode characters exactly as they appear — do not convert them to HTML entities. "
             f"Return ONLY valid HTML. No explanations, no markdown, no code fences, no <html>/<head>/<body> tags."
         )
 
@@ -220,7 +222,7 @@ def _regenerate_chunk(
             chunk_index + 1, total_chunks, finish_reason,
         )
 
-    return response.choices[0].message.content
+    return html_lib.unescape(response.choices[0].message.content)
 
 
 def regenerate_html(
