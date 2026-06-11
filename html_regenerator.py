@@ -5,11 +5,46 @@ from typing import Callable, Optional
 
 import openai
 from openai import OpenAI
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
 
 logger = logging.getLogger(__name__)
 
 MAX_CHARS_PER_CHUNK = 30_000
+_CHARS_HARD_LIMIT = 300_000  # ~100k tokens at 3 chars/token — well under 128k context
+
+_HEAD_LINK_RELS_TO_STRIP = {
+    "preload", "prefetch", "dns-prefetch", "preconnect",
+    "canonical", "alternate", "manifest", "stylesheet",
+}
+
+
+def _split_node_into_parts(node, max_chars: int) -> list[str]:
+    """
+    Returns a list of HTML strings derived from node, each <= max_chars.
+    Recursively descends into child nodes for oversized elements.
+    Falls back to string truncation only for irreducible leaf nodes.
+    """
+    node_str = str(node)
+    if len(node_str) <= max_chars:
+        return [node_str]
+    if isinstance(node, Tag) and node.name:
+        parts: list[str] = []
+        current: list[str] = []
+        current_size = 0
+        for child in node.children:
+            for part in _split_node_into_parts(child, max_chars):
+                if current and current_size + len(part) > max_chars:
+                    parts.append("".join(current))
+                    current = [part]
+                    current_size = len(part)
+                else:
+                    current.append(part)
+                    current_size += len(part)
+        if current:
+            parts.append("".join(current))
+        return parts if parts else [node_str[:max_chars]]
+    logger.warning("Leaf node too large to split (%d chars), truncating to %d", len(node_str), max_chars)
+    return [node_str[:max_chars]]
 
 
 def split_html_into_chunks(html: str, max_chars: int = MAX_CHARS_PER_CHUNK) -> tuple[list[str], list[str], list[str]]:
@@ -28,29 +63,52 @@ def split_html_into_chunks(html: str, max_chars: int = MAX_CHARS_PER_CHUNK) -> t
         return [html], ["raw"], []
 
     head_scripts = [str(tag) for tag in head.find_all("script")]
-    for tag in head.find_all(["script", "style"]):
+    for tag in head.find_all(["script", "style", "noscript"]):
         tag.decompose()
 
-    if len(str(head)) > max_chars:
-        logger.warning("Head element exceeds %d chars after stripping scripts/styles (%d chars) — sending as single chunk", max_chars, len(str(head)))
+    # Strip link tags that serve no purpose after visual regeneration
+    for tag in head.find_all("link"):
+        rel = " ".join(tag.get("rel", [])).lower()
+        if rel in _HEAD_LINK_RELS_TO_STRIP:
+            tag.decompose()
 
-    chunks = [str(head)]
+    # Strip meta tags that are irrelevant to visual regeneration
+    for tag in head.find_all("meta"):
+        prop = tag.get("property", "")
+        name = tag.get("name", "").lower()
+        http_equiv = tag.get("http-equiv", "")
+        if (
+            prop.startswith("og:")
+            or name.startswith("twitter:")
+            or http_equiv
+            or name == "robots"
+        ):
+            tag.decompose()
+
+    head_str = str(head)
+    if len(head_str) > max_chars:
+        logger.warning(
+            "Head element still exceeds %d chars after stripping (%d chars) — truncating",
+            max_chars, len(head_str),
+        )
+        head_str = head_str[:max_chars]
+
+    chunks = [head_str]
     labels = ["head"]
 
     current_parts: list[str] = []
     current_size = 0
 
     for child in body.children:
-        child_str = str(child)
-        child_size = len(child_str)
-        if current_parts and current_size + child_size > max_chars:
-            chunks.append("".join(current_parts))
-            labels.append("body")
-            current_parts = [child_str]
-            current_size = child_size
-        else:
-            current_parts.append(child_str)
-            current_size += child_size
+        for part in _split_node_into_parts(child, max_chars):
+            if current_parts and current_size + len(part) > max_chars:
+                chunks.append("".join(current_parts))
+                labels.append("body")
+                current_parts = [part]
+                current_size = len(part)
+            else:
+                current_parts.append(part)
+                current_size += len(part)
 
     if current_parts:
         chunks.append("".join(current_parts))
@@ -67,6 +125,13 @@ def _regenerate_chunk(
     chunk_index: int,
     total_chunks: int,
 ) -> str:
+    if len(chunk) > _CHARS_HARD_LIMIT:
+        logger.warning(
+            "[OpenAI] Chunk %d/%d exceeds hard limit (%d chars > %d), truncating",
+            chunk_index + 1, total_chunks, len(chunk), _CHARS_HARD_LIMIT,
+        )
+        chunk = chunk[:_CHARS_HARD_LIMIT]
+
     if label == "head":
         system_msg = (
             f"You are an HTML transformation expert for a website theme regeneration system.\n\n"
