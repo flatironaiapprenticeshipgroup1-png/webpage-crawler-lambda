@@ -2,6 +2,7 @@ import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Optional
+from urllib.parse import urljoin
 
 import openai
 from openai import OpenAI
@@ -47,7 +48,7 @@ def _split_node_into_parts(node, max_chars: int) -> list[str]:
     return [node_str[:max_chars]]
 
 
-def split_html_into_chunks(html: str, max_chars: int = MAX_CHARS_PER_CHUNK) -> tuple[list[str], list[str], list[str]]:
+def split_html_into_chunks(html: str, base_url: str = "", max_chars: int = MAX_CHARS_PER_CHUNK) -> tuple[list[str], list[str], list[str]]:
     """
     Returns (chunks, labels, head_scripts) where labels are 'head' or 'body'.
     Chunk 0 is always the <head> element (with scripts/styles stripped);
@@ -61,6 +62,12 @@ def split_html_into_chunks(html: str, max_chars: int = MAX_CHARS_PER_CHUNK) -> t
 
     if not head or not body:
         return [html], ["raw"], []
+
+    if base_url:
+        for img in soup.find_all("img"):
+            src = img.get("src", "")
+            if src and not src.startswith(("http://", "https://", "data:")):
+                img["src"] = urljoin(base_url, src)
 
     head_scripts = [str(tag) for tag in head.find_all("script")]
     for tag in head.find_all(["script", "style", "noscript"]):
@@ -176,12 +183,7 @@ def _regenerate_chunk(
             f"Preserve core factual content (product names, prices, key data)\n\n"
             f"IT IS VERY IMPORTANT THAT THE WEBSITE LOOKS CLEAN, IMPRESSIVE, AND NOT CLUNKY\n\n"
             f"IMAGES:\n"
-            f"Every <img> tag must have a working public src URL.\n"
-            f"Replace ALL src attributes with: https://picsum.photos/seed/{{keyword}}/{{width}}/{{height}}\n"
-            f"- {{keyword}}: 1-3 hyphenated words describing the image based on its alt text, "
-            f"surrounding content, or theme (e.g. hero-landscape, team-office, product-technology)\n"
-            f"- {{width}} and {{height}}: pixel dimensions appropriate for the element's role in the layout\n"
-            f"- Set a meaningful alt attribute on every image\n\n"
+            f"Preserve every <img> src attribute exactly as given — do not change image URLs\n\n"
             f"RULES:\n"
             f"You MAY use inline styles for layout properties only "
             f"(flex, grid, position, width, height, gap, margin, padding for structural spacing),\n"
@@ -252,6 +254,7 @@ def regenerate_html(
     html: str,
     theme: str,
     on_chunk_complete: Optional[Callable[[int, int], None]] = None,
+    base_url: str = "",
 ) -> str:
     """
     Regenerates HTML using GPT-4o, processing chunks in parallel.
@@ -260,7 +263,7 @@ def regenerate_html(
     caller's responsibility) after each chunk finishes — use it to publish
     per-chunk status updates from the handler.
     """
-    chunks, labels, head_scripts = split_html_into_chunks(html)
+    chunks, labels, head_scripts = split_html_into_chunks(html, base_url=base_url)
     logger.info("Split HTML into %d chunk(s) for processing (stripped %d head script(s))", len(chunks), len(head_scripts))
 
     results: dict[int, str] = {}

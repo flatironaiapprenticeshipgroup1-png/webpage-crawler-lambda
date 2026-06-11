@@ -96,7 +96,7 @@ def lambda_handler(event, context):
                     f"Regenerated HTML chunk {chunk_index + 1} of {total_chunks}",
                 )
 
-            regenerated_html = html_regenerator.regenerate_html(openai_client, html, theme, on_chunk_complete)
+            regenerated_html = html_regenerator.regenerate_html(openai_client, html, theme, on_chunk_complete, base_url=url)
 
             s3.put_object(
                 Bucket=bucket,
