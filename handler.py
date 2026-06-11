@@ -73,6 +73,8 @@ def lambda_handler(event, context):
             css_info = extract_css(html, url)
             external_css = download_css_files(css_info["css_links"])
             all_css = external_css + "\n".join(css_info["inline_styles"])
+            if not all_css.strip():
+                all_css = "/* No source CSS found — generate complete theme stylesheet from scratch */\nbody {}\n"
 
             print("Creating HTML and CSS files")
             s3.put_object(Bucket=bucket, Key=f"{website_id}/index.html", Body=html, ContentType="text/html")
