@@ -12,11 +12,12 @@ logger = logging.getLogger(__name__)
 MAX_CHARS_PER_CHUNK = 30_000
 
 
-def split_html_into_chunks(html: str, max_chars: int = MAX_CHARS_PER_CHUNK) -> tuple[list[str], list[str]]:
+def split_html_into_chunks(html: str, max_chars: int = MAX_CHARS_PER_CHUNK) -> tuple[list[str], list[str], list[str]]:
     """
-    Returns (chunks, labels) where labels are 'head' or 'body'.
-    Chunk 0 is always the <head> element; subsequent chunks are groups
-    of top-level <body> children packed to max_chars each.
+    Returns (chunks, labels, head_scripts) where labels are 'head' or 'body'.
+    Chunk 0 is always the <head> element (with scripts/styles stripped);
+    subsequent chunks are groups of top-level <body> children packed to max_chars each.
+    head_scripts contains the original <script> tags to be reinserted after regeneration.
     Falls back to a single raw chunk if the document can't be parsed.
     """
     soup = BeautifulSoup(html, "html.parser")
@@ -24,7 +25,14 @@ def split_html_into_chunks(html: str, max_chars: int = MAX_CHARS_PER_CHUNK) -> t
     body = soup.find("body")
 
     if not head or not body:
-        return [html], ["raw"]
+        return [html], ["raw"], []
+
+    head_scripts = [str(tag) for tag in head.find_all("script")]
+    for tag in head.find_all(["script", "style"]):
+        tag.decompose()
+
+    if len(str(head)) > max_chars:
+        logger.warning("Head element exceeds %d chars after stripping scripts/styles (%d chars) — sending as single chunk", max_chars, len(str(head)))
 
     chunks = [str(head)]
     labels = ["head"]
@@ -48,7 +56,7 @@ def split_html_into_chunks(html: str, max_chars: int = MAX_CHARS_PER_CHUNK) -> t
         chunks.append("".join(current_parts))
         labels.append("body")
 
-    return chunks, labels
+    return chunks, labels, head_scripts
 
 
 def _regenerate_chunk(
@@ -180,8 +188,8 @@ def regenerate_html(
     caller's responsibility) after each chunk finishes — use it to publish
     per-chunk status updates from the handler.
     """
-    chunks, labels = split_html_into_chunks(html)
-    logger.info("Split HTML into %d chunk(s) for processing", len(chunks))
+    chunks, labels, head_scripts = split_html_into_chunks(html)
+    logger.info("Split HTML into %d chunk(s) for processing (stripped %d head script(s))", len(chunks), len(head_scripts))
 
     results: dict[int, str] = {}
 
@@ -205,9 +213,10 @@ def regenerate_html(
 
     head_content = results[0]
     body_parts = [results[i] for i in range(1, len(chunks))]
+    scripts_block = ("\n" + "\n".join(head_scripts)) if head_scripts else ""
     return (
         f"<!DOCTYPE html>\n<html>\n"
-        f"<head>{head_content}</head>\n"
+        f"<head>{head_content}{scripts_block}</head>\n"
         f"<body>{''.join(body_parts)}</body>\n"
         f"</html>"
     )
