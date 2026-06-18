@@ -151,6 +151,7 @@ def test_happy_path_publishes_all_steps_in_order():
         "received",
         "crawling_html",
         "extracting_css",
+        "extracting_images",
         "regenerating_html",
         "queueing_ai",
     ], f"Unexpected steps: {steps}"

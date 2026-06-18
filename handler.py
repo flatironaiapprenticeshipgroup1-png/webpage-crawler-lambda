@@ -1,5 +1,6 @@
 import json
 import logging
+import mimetypes
 import os
 import threading
 import uuid
@@ -9,6 +10,7 @@ from openai import OpenAI
 
 import html_regenerator
 from crawler import crawl_website_html, extract_css, download_css_files
+from image_downloader import extract_image_urls, download_images
 
 from status_publisher import get_current_sequence, publish_status_update
 
@@ -76,6 +78,24 @@ def lambda_handler(event, context):
             if not all_css.strip():
                 all_css = "/* No source CSS found — generate complete theme stylesheet from scratch */\nbody {}\n"
 
+            print("Extracting and caching images")
+            publish("extracting_images", "processing", "Downloading and caching source images")
+            image_urls = extract_image_urls(html, url)
+            downloaded_images = download_images(image_urls)
+            image_map = {}
+            for idx, (original_url, image) in enumerate(downloaded_images.items()):
+                ext = mimetypes.guess_extension(image["content_type"]) or ".jpg"
+                if ext == ".jpe":
+                    ext = ".jpg"
+                key_name = f"img-{idx}{ext}"
+                s3.put_object(
+                    Bucket=bucket,
+                    Key=f"{website_id}/images/{key_name}",
+                    Body=image["content"],
+                    ContentType=image["content_type"],
+                )
+                image_map[original_url] = f"./images/{key_name}"
+
             print("Creating HTML and CSS files")
             s3.put_object(Bucket=bucket, Key=f"{website_id}/index.html", Body=html, ContentType="text/html")
             s3.put_object(Bucket=bucket, Key=f"{website_id}/original-styles.css", Body=all_css, ContentType="text/css")
@@ -98,7 +118,9 @@ def lambda_handler(event, context):
                     f"Regenerated HTML chunk {chunk_index + 1} of {total_chunks}",
                 )
 
-            regenerated_html = html_regenerator.regenerate_html(openai_client, html, theme, on_chunk_complete, base_url=url)
+            regenerated_html = html_regenerator.regenerate_html(
+                openai_client, html, theme, on_chunk_complete, base_url=url, image_map=image_map,
+            )
 
             s3.put_object(
                 Bucket=bucket,

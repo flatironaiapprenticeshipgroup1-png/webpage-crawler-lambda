@@ -62,14 +62,24 @@ def _split_node_into_parts(node, max_chars: int) -> list[str]:
     return [node_str[:max_chars]]
 
 
-def split_html_into_chunks(html: str, base_url: str = "", max_chars: int = MAX_CHARS_PER_CHUNK) -> tuple[list[str], list[str], list[str]]:
+def split_html_into_chunks(
+    html: str,
+    base_url: str = "",
+    image_map: Optional[dict[str, str]] = None,
+    max_chars: int = MAX_CHARS_PER_CHUNK,
+) -> tuple[list[str], list[str], list[str]]:
     """
     Returns (chunks, labels, head_scripts) where labels are 'head' or 'body'.
     Chunk 0 is always the <head> element (with scripts/styles stripped);
     subsequent chunks are groups of top-level <body> children packed to max_chars each.
     head_scripts contains the original <script> tags to be reinserted after regeneration.
     Falls back to a single raw chunk if the document can't be parsed.
+
+    image_map maps an image's absolute source URL to a cached local path (e.g.
+    "./images/img-0.jpg"); images not present in the map fall back to their
+    absolute original URL so they still render even if caching failed.
     """
+    image_map = image_map or {}
     soup = BeautifulSoup(html, "html.parser")
     head = soup.find("head")
     body = soup.find("body")
@@ -80,8 +90,10 @@ def split_html_into_chunks(html: str, base_url: str = "", max_chars: int = MAX_C
     if base_url:
         for img in soup.find_all("img"):
             src = img.get("src", "")
-            if src and not src.startswith(("http://", "https://", "data:")):
-                img["src"] = urljoin(base_url, src)
+            if not src or src.startswith("data:"):
+                continue
+            absolute = urljoin(base_url, src)
+            img["src"] = image_map.get(absolute, absolute)
 
     head_scripts = [str(tag) for tag in head.find_all("script")]
     for tag in head.find_all(["script", "style", "noscript"]):
@@ -179,6 +191,8 @@ def _regenerate_chunk(
             f"Do not use inline styles for visual properties (colors, fonts, borders, shadows, backgrounds) — those are handled by CSS.\n\n"
             f"IMPORTANT: Preserve all existing class names and id attributes exactly as they are. "
             f"The CSS is generated separately and targets those selectors — if you rename them, the styling breaks.\n\n"
+            f"IMPORTANT: Preserve every <img> src attribute exactly as given — do not invent, replace, or omit image URLs. "
+            f"The src value of the <img> tags must stay byte-for-byte the same.\n\n"
             f"Preserve all factual content (product names, prices, key data). "
             f"Preserve all emojis and special Unicode characters exactly as they appear — do not convert them to HTML entities. "
             f"Return ONLY valid HTML. No explanations, no markdown, no code fences, no <html>/<head>/<body> tags."
@@ -246,6 +260,7 @@ def regenerate_html(
     theme: str,
     on_chunk_complete: Optional[Callable[[int, int], None]] = None,
     base_url: str = "",
+    image_map: Optional[dict[str, str]] = None,
 ) -> str:
     """
     Regenerates HTML using GPT-4o, processing chunks in parallel.
@@ -254,7 +269,7 @@ def regenerate_html(
     caller's responsibility) after each chunk finishes — use it to publish
     per-chunk status updates from the handler.
     """
-    chunks, labels, head_scripts = split_html_into_chunks(html, base_url=base_url)
+    chunks, labels, head_scripts = split_html_into_chunks(html, base_url=base_url, image_map=image_map)
     logger.info("Split HTML into %d chunk(s) for processing (stripped %d head script(s))", len(chunks), len(head_scripts))
 
     results: dict[int, str] = {}
