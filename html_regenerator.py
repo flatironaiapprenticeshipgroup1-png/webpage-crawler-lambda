@@ -281,6 +281,9 @@ def regenerate_html(
     if "Regenerated-Styles.css" not in head_content:
         logger.warning("[OpenAI] Regenerated head omitted the stylesheet link — inserting it")
         head_content += '\n<link rel="stylesheet" href="./Regenerated-Styles.css">'
+    if "charset" not in head_content.lower():
+        logger.warning("[OpenAI] Regenerated head omitted a charset declaration — inserting one")
+        head_content = '<meta charset="utf-8">\n' + head_content
     body_parts = [results[i] for i in range(1, len(chunks))]
     scripts_block = ("\n" + "\n".join(head_scripts)) if head_scripts else ""
     return (

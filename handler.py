@@ -104,7 +104,7 @@ def lambda_handler(event, context):
                 Bucket=bucket,
                 Key=f"{website_id}/Regenerated-Index.html",
                 Body=regenerated_html.encode("utf-8"),
-                ContentType="text/html",
+                ContentType="text/html; charset=utf-8",
                 CacheControl="no-store, no-cache, must-revalidate",
             )
             logger.info("Regenerated HTML saved to S3 for website ID %s", website_id)
