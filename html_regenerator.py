@@ -158,7 +158,7 @@ def _regenerate_chunk(
             f"You are an HTML transformation expert for a website theme regeneration system.\n\n"
             f"You will receive the contents of a <head> element. Transform it for the theme: {theme}\n\n"
             f"REQUIRED:\n"
-            f"- Replace ALL <link rel=\"stylesheet\"> tags with exactly one: "
+            f"- Add exactly one stylesheet link, even if the original had none: "
             f"<link rel=\"stylesheet\" href=\"./Regenerated-Styles.css\">\n"
             f"- Remove ALL <style> blocks (inline CSS is handled by the regenerated stylesheet)\n"
             f"- Update <title> to reflect the theme\n\n"
@@ -278,6 +278,9 @@ def regenerate_html(
         return results[0]
 
     head_content = results[0]
+    if "Regenerated-Styles.css" not in head_content:
+        logger.warning("[OpenAI] Regenerated head omitted the stylesheet link — inserting it")
+        head_content += '\n<link rel="stylesheet" href="./Regenerated-Styles.css">'
     body_parts = [results[i] for i in range(1, len(chunks))]
     scripts_block = ("\n" + "\n".join(head_scripts)) if head_scripts else ""
     return (
