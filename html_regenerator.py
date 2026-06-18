@@ -1,5 +1,6 @@
 import html as html_lib
 import logging
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable, Optional
@@ -13,6 +14,18 @@ logger = logging.getLogger(__name__)
 
 MAX_CHARS_PER_CHUNK = 30_000
 _CHARS_HARD_LIMIT = 300_000  # ~100k tokens at 3 chars/token — well under 128k context
+
+_NUMERIC_ENTITY_RE = re.compile(r"&#x?[0-9a-fA-F]+;")
+
+
+def _unescape_numeric_entities(text: str) -> str:
+    """
+    Unescapes only numeric character references (e.g. &#128512;), which is how
+    models sometimes encode emoji despite instructions not to. Unlike html.unescape,
+    this leaves named entities like &quot; and &amp; alone so attribute values
+    that are legitimately escaped don't get corrupted into malformed markup.
+    """
+    return _NUMERIC_ENTITY_RE.sub(lambda m: html_lib.unescape(m.group(0)), text)
 
 _HEAD_LINK_RELS_TO_STRIP = {
     "preload", "prefetch", "dns-prefetch", "preconnect",
@@ -224,7 +237,7 @@ def _regenerate_chunk(
             chunk_index + 1, total_chunks, finish_reason,
         )
 
-    return html_lib.unescape(response.choices[0].message.content)
+    return _unescape_numeric_entities(response.choices[0].message.content)
 
 
 def regenerate_html(
