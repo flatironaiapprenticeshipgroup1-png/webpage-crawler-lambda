@@ -23,6 +23,7 @@ os.environ["S3_BUCKET_NAME"] = "test-bucket"
 os.environ["DYNAMODB_TABLE_NAME"] = "test-table"
 os.environ["SQS_QUEUE_URL"] = "https://sqs.us-east-1.amazonaws.com/123/test.fifo"
 os.environ["ABLY_SECRET_NAME"] = "test/ably-secret"
+os.environ["SECRET_NAME"] = "test/openai-secret"
 
 WEBSITE_ID = "abc-123"
 URL = "https://example.com"
@@ -78,7 +79,7 @@ def make_mocks():
     mock_sqs = MagicMock()
     mock_secrets = MagicMock()
     mock_secrets.get_secret_value.return_value = {
-        "SecretString": json.dumps({"AblyApiKey": "fake-key"})
+        "SecretString": json.dumps({"AblyApiKey": "fake-key", "OpenAIAPIKey": "fake-openai-key"})
     }
 
     def boto3_client_factory(service, **kwargs):
@@ -130,9 +131,7 @@ def test_happy_path_publishes_all_steps_in_order():
     ), patch(
         "crawler.download_css_files", return_value=""
     ), patch(
-        "crawler.rewrite_html_for_regenerated_styles",
-        return_value="<html></html>",
-        create=True,
+        "html_regenerator.regenerate_html", return_value="<html></html>"
     ):
 
         # Re-import to pick up patches
@@ -152,6 +151,8 @@ def test_happy_path_publishes_all_steps_in_order():
         "received",
         "crawling_html",
         "extracting_css",
+        "extracting_images",
+        "regenerating_html",
         "queueing_ai",
     ], f"Unexpected steps: {steps}"
 
@@ -163,7 +164,7 @@ def test_happy_path_publishes_all_steps_in_order():
     statuses = [c.args[1]["status"] for c in published_calls]
     assert all(s == "processing" for s in statuses)
 
-    assert mock_s3.put_object.call_count == 2
+    assert mock_s3.put_object.call_count == 3  # index.html, original-styles.css, Regenerated-Index.html
     assert mock_dynamodb.put_item.call_count == 1
     assert mock_sqs.send_message.call_count == 1
     print("test_happy_path_publishes_all_steps_in_order: PASSED")
@@ -227,10 +228,6 @@ def test_s3_failure_publishes_failed():
         "crawler.extract_css", return_value={"css_links": [], "inline_styles": []}
     ), patch(
         "crawler.download_css_files", return_value=""
-    ), patch(
-        "crawler.rewrite_html_for_regenerated_styles",
-        return_value="<html></html>",
-        create=True,
     ):
 
         if "handler" in sys.modules:
@@ -245,6 +242,56 @@ def test_s3_failure_publishes_failed():
     steps = [c.args[1]["step"] for c in mock_channel.publish.call_args_list]
     assert "failed" in steps
     print("test_s3_failure_publishes_failed: PASSED")
+
+
+def test_oversized_css_file_publishes_failed():
+    """
+    Test the handler publishes failure status when a downloaded CSS file
+    exceeds the maximum allowed character limit.
+
+    Verifies:
+    1. When download_css_files raises ValueError for an oversized CSS file,
+       the handler propagates it as a batch item failure
+    2. "failed" step is published with status="failed" and an error message
+       describing the size-limit violation
+    """
+    mock_s3, mock_dynamodb, mock_sqs, mock_channel, mock_ably_rest, boto3_factory = (
+        make_mocks()
+    )
+
+    oversized_error = ValueError(
+        "CSS file https://example.com/big.css exceeds maximum allowed size "
+        "of 500000 characters (got 600000)"
+    )
+
+    with patch("boto3.client", side_effect=boto3_factory), patch(
+        "ably.AblyRest", return_value=mock_ably_rest
+    ), patch("crawler.crawl_website_html", return_value="<html></html>"), patch(
+        "crawler.extract_css",
+        return_value={"css_links": ["https://example.com/big.css"], "inline_styles": []},
+    ), patch(
+        "crawler.download_css_files", side_effect=oversized_error
+    ):
+
+        if "handler" in sys.modules:
+            del sys.modules["handler"]
+        if "status_publisher" in sys.modules:
+            del sys.modules["status_publisher"]
+        import handler
+
+        result = handler.lambda_handler(make_event(), {})
+
+    assert result["batchItemFailures"] == [{"itemIdentifier": "msg-001"}]
+    steps = [c.args[1]["step"] for c in mock_channel.publish.call_args_list]
+    assert "failed" in steps
+    failed_event = next(
+        c.args[1]
+        for c in mock_channel.publish.call_args_list
+        if c.args[1]["step"] == "failed"
+    )
+    assert failed_event["status"] == "failed"
+    assert "exceeds maximum allowed size" in failed_event["error"]
+    print("test_oversized_css_file_publishes_failed: PASSED")
 
 
 def test_sequence_numbers_always_increase():
@@ -267,9 +314,7 @@ def test_sequence_numbers_always_increase():
     ), patch(
         "crawler.download_css_files", return_value=""
     ), patch(
-        "crawler.rewrite_html_for_regenerated_styles",
-        return_value="<html></html>",
-        create=True,
+        "html_regenerator.regenerate_html", return_value="<html></html>"
     ):
 
         if "handler" in sys.modules:
@@ -312,9 +357,8 @@ def test_retry_continues_sequence_from_existing():
     ), patch(
         "crawler.download_css_files", return_value=""
     ), patch(
-        "crawler.rewrite_html_for_regenerated_styles",
+        "html_regenerator.regenerate_html",
         return_value="<html></html>",
-        create=True,
     ):
 
         if "handler" in sys.modules:
@@ -339,6 +383,7 @@ def test_retry_continues_sequence_from_existing():
 if __name__ == "__main__":
     test_happy_path_publishes_all_steps_in_order()
     test_crawl_failure_publishes_failed()
+    test_oversized_css_file_publishes_failed()
     test_s3_failure_publishes_failed()
     test_sequence_numbers_always_increase()
     test_retry_continues_sequence_from_existing()
