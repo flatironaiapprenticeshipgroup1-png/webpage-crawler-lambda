@@ -52,8 +52,7 @@ def download_css_files(css_links: list) -> str:
 
         if len(response.text) > max_css_file_chars:
             raise ValueError(
-                f"CSS file {link} exceeds maximum allowed size of "
-                f"{max_css_file_chars} characters (got {len(response.text)})"
+                f"Website CSS is too large. Website's CSS content exceeds maximum allowed size of {max_css_file_chars} characters for ai css regeneration"
             )
 
         combined += response.text + "\n"
