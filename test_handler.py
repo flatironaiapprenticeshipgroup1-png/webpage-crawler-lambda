@@ -130,8 +130,6 @@ def test_happy_path_publishes_all_steps_in_order():
         return_value={"css_links": [], "inline_styles": ["body{}"]},
     ), patch(
         "crawler.download_css_files", return_value=""
-    ), patch(
-        "html_regenerator.regenerate_html", return_value="<html></html>"
     ):
 
         # Re-import to pick up patches
@@ -152,7 +150,6 @@ def test_happy_path_publishes_all_steps_in_order():
         "crawling_html",
         "extracting_css",
         "extracting_images",
-        "regenerating_html",
         "queueing_ai",
     ], f"Unexpected steps: {steps}"
 
@@ -164,7 +161,9 @@ def test_happy_path_publishes_all_steps_in_order():
     statuses = [c.args[1]["status"] for c in published_calls]
     assert all(s == "processing" for s in statuses)
 
-    assert mock_s3.put_object.call_count == 3  # index.html, original-styles.css, Regenerated-Index.html
+    assert mock_s3.put_object.call_count == 3  # index.html, original-styles.css, image-map.json
+    put_keys = [c.kwargs["Key"] for c in mock_s3.put_object.call_args_list]
+    assert f"{WEBSITE_ID}/Regenerated-Index.html" not in put_keys
     assert mock_dynamodb.put_item.call_count == 1
     assert mock_sqs.send_message.call_count == 1
     print("test_happy_path_publishes_all_steps_in_order: PASSED")
@@ -313,8 +312,6 @@ def test_sequence_numbers_always_increase():
         "crawler.extract_css", return_value={"css_links": [], "inline_styles": []}
     ), patch(
         "crawler.download_css_files", return_value=""
-    ), patch(
-        "html_regenerator.regenerate_html", return_value="<html></html>"
     ):
 
         if "handler" in sys.modules:
@@ -356,9 +353,6 @@ def test_retry_continues_sequence_from_existing():
         return_value={"css_links": [], "inline_styles": ["body{}"]},
     ), patch(
         "crawler.download_css_files", return_value=""
-    ), patch(
-        "html_regenerator.regenerate_html",
-        return_value="<html></html>",
     ):
 
         if "handler" in sys.modules:
