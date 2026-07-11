@@ -7,7 +7,7 @@ RUN dnf install -y atk cups-libs gtk3 libXcomposite libXcursor libXdamage \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright playwright install chromium && \
     chmod -R 777 /ms-playwright
 
-COPY handler.py crawler.py html_regenerator.py image_downloader.py status_publisher.py requirements.txt ${LAMBDA_TASK_ROOT}/
+COPY handler.py crawler.py image_downloader.py status_publisher.py requirements.txt ${LAMBDA_TASK_ROOT}/
 RUN pip install -r requirements.txt
 
 CMD ["handler.lambda_handler"]
