@@ -134,15 +134,21 @@ def test_happy_path_preserves_artifact_and_queue_contracts():
     assert set(objects) == {
         f"{WEBSITE_ID}/images/img-0.png",
         f"{WEBSITE_ID}/index.html",
+        f"{WEBSITE_ID}/Regenerated-Index.html",
         f"{WEBSITE_ID}/original-styles.css",
     }
-    assert not any(key.endswith("Regenerated-Index.html") for key in objects)
-    assert objects[f"{WEBSITE_ID}/index.html"]["Body"] == INLINE_HTML.encode("utf-8")
-    assert objects[f"{WEBSITE_ID}/index.html"]["Body"] != RAW_HTML.encode("utf-8")
+    assert objects[f"{WEBSITE_ID}/index.html"]["Body"] == RAW_HTML.encode("utf-8")
     assert objects[f"{WEBSITE_ID}/index.html"]["ContentType"] == "text/html; charset=utf-8"
+    assert objects[f"{WEBSITE_ID}/Regenerated-Index.html"]["Body"] == INLINE_HTML.encode("utf-8")
+    assert objects[f"{WEBSITE_ID}/Regenerated-Index.html"]["Body"] != RAW_HTML.encode("utf-8")
+    assert (
+        objects[f"{WEBSITE_ID}/Regenerated-Index.html"]["ContentType"]
+        == "text/html; charset=utf-8"
+    )
     assert objects[f"{WEBSITE_ID}/original-styles.css"]["Body"] == ALL_CSS.encode("utf-8")
     assert objects[f"{WEBSITE_ID}/original-styles.css"]["ContentType"] == "text/css; charset=utf-8"
     assert isinstance(objects[f"{WEBSITE_ID}/index.html"]["Body"], bytes)
+    assert isinstance(objects[f"{WEBSITE_ID}/Regenerated-Index.html"]["Body"], bytes)
     assert isinstance(objects[f"{WEBSITE_ID}/original-styles.css"]["Body"], bytes)
     prepare_mock.assert_called_once_with(
         RAW_HTML,
@@ -181,9 +187,9 @@ def test_processor_failure_is_a_batch_failure_and_does_not_queue_downstream():
     assert failed["status"] == "failed"
     assert failed["error"] == "premailer failed"
     assert mock_sqs.send_message.call_count == 0
-    assert not any(
-        call.kwargs["Key"].endswith("index.html") for call in mock_s3.put_object.call_args_list
-    )
+    written_keys = {call.kwargs["Key"] for call in mock_s3.put_object.call_args_list}
+    assert f"{WEBSITE_ID}/index.html" not in written_keys
+    assert f"{WEBSITE_ID}/Regenerated-Index.html" not in written_keys
 
 
 def test_crawl_failure_publishes_failed():

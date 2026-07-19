@@ -90,6 +90,12 @@ def lambda_handler(event, context):
             s3.put_object(
                 Bucket=bucket,
                 Key=f"{website_id}/index.html",
+                Body=html.encode("utf-8"),
+                ContentType="text/html; charset=utf-8",
+            )
+            s3.put_object(
+                Bucket=bucket,
+                Key=f"{website_id}/Regenerated-Index.html",
                 Body=inline_html.encode("utf-8"),
                 ContentType="text/html; charset=utf-8",
             )
