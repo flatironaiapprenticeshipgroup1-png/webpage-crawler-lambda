@@ -1,56 +1,37 @@
-"""
-Test suite for the Lambda handler module.
-
-This module provides comprehensive test coverage for the webpage-crawler-lambda
-handler function. Tests verify:
-
-1. Happy path: Correct execution flow with expected status publications
-2. Error handling: Proper failure status publishing on crawler/storage errors
-3. Sequence numbering: Monotonically increasing sequence numbers across updates
-4. AWS integration: Correct interactions with S3, DynamoDB, and SQS
-
-Each test uses mocking to isolate the handler logic from AWS services and
-external dependencies (Ably, crawler functions).
-"""
-
+import importlib
 import json
 import os
 import sys
+from contextlib import contextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
-# Set env vars before importing handler
+
 os.environ["S3_BUCKET_NAME"] = "test-bucket"
 os.environ["DYNAMODB_TABLE_NAME"] = "test-table"
 os.environ["SQS_QUEUE_URL"] = "https://sqs.us-east-1.amazonaws.com/123/test.fifo"
 os.environ["ABLY_SECRET_NAME"] = "test/ably-secret"
-os.environ["SECRET_NAME"] = "test/openai-secret"
 
 WEBSITE_ID = "abc-123"
 URL = "https://example.com"
 THEME = "dark"
+RAW_HTML = "<!DOCTYPE html><html><body><p>Raw crawl</p></body></html>"
+INLINE_HTML = "<!DOCTYPE html><html><body><p style=\"color: red\">Processed ✓</p></body></html>"
+CSS_SOURCES = [{"kind": "embedded", "css": "p { color: red; }"}]
+ALL_CSS = "p { color: red; }"
 
 
-def make_event(website_id=WEBSITE_ID, url=URL, theme=THEME):
-    """
-    Create a test SQS event with website regeneration request.
-
-    Args:
-        website_id: Website identifier (default: "abc-123")
-        url: Website URL to crawl (default: "https://example.com")
-        theme: Theme for regeneration (default: "dark")
-
-    Returns:
-        dict: SQS event with a single record containing the regeneration request
-    """
+def make_event(records=None):
+    if records is not None:
+        return {"Records": records}
     return {
         "Records": [
             {
                 "messageId": "msg-001",
                 "body": json.dumps(
                     {
-                        "RegeneratedWebsiteId": website_id,
-                        "RegeneratedWebsiteUrl": url,
-                        "RegenerationTheme": theme,
+                        "RegeneratedWebsiteId": WEBSITE_ID,
+                        "RegeneratedWebsiteUrl": URL,
+                        "RegenerationTheme": THEME,
                     }
                 ),
             }
@@ -59,31 +40,16 @@ def make_event(website_id=WEBSITE_ID, url=URL, theme=THEME):
 
 
 def make_mocks():
-    """
-    Create mocked AWS service clients and Ably objects.
-
-    Sets up mock objects for:
-    - S3 client: For HTML/CSS storage
-    - DynamoDB client: For job metadata storage
-    - SQS client: For AI regeneration queue
-    - Secrets Manager: For Ably API key retrieval
-    - Ably REST client: For real-time status publishing
-
-    Returns:
-        tuple: (mock_s3, mock_dynamodb, mock_sqs, mock_ably_channel,
-                mock_ably_rest, boto3_client_factory)
-    """
     mock_s3 = MagicMock()
     mock_dynamodb = MagicMock()
     mock_dynamodb.get_item.return_value = {}
     mock_sqs = MagicMock()
     mock_secrets = MagicMock()
     mock_secrets.get_secret_value.return_value = {
-        "SecretString": json.dumps({"AblyApiKey": "fake-key", "OpenAIAPIKey": "fake-openai-key"})
+        "SecretString": json.dumps({"AblyApiKey": "fake-key"})
     }
 
     def boto3_client_factory(service, **kwargs):
-        """Factory function to return mocked boto3 clients by service name."""
         return {
             "s3": mock_s3,
             "dynamodb": mock_dynamodb,
@@ -91,300 +57,202 @@ def make_mocks():
             "secretsmanager": mock_secrets,
         }[service]
 
-    mock_ably_channel = MagicMock()
-    mock_ably_channel.publish = AsyncMock()
+    mock_channel = MagicMock()
+    mock_channel.publish = AsyncMock()
     mock_ably_rest = MagicMock()
-    mock_ably_rest.channels.get.return_value = mock_ably_channel
-
+    mock_ably_rest.channels.get.return_value = mock_channel
     return (
         mock_s3,
         mock_dynamodb,
         mock_sqs,
-        mock_ably_channel,
+        mock_secrets,
+        mock_channel,
         mock_ably_rest,
         boto3_client_factory,
     )
 
 
-def test_happy_path_publishes_all_steps_in_order():
-    """
-    Test the handler successfully processes a website crawl request.
-
-    Verifies:
-    1. Handler returns 200 status code
-    2. All expected processing steps are published in correct order:
-       received -> crawling_html -> extracting_css -> saving_original_assets
-       -> saving_metadata -> queueing_ai
-    3. Sequence numbers increase monotonically from 1 to N
-    4. All status updates have "processing" status
-    5. Correct number of S3, DynamoDB, and SQS operations are performed
-    """
-    mock_s3, mock_dynamodb, mock_sqs, mock_channel, mock_ably_rest, boto3_factory = (
-        make_mocks()
-    )
-
+@contextmanager
+def imported_handler(boto3_factory, mock_ably_rest):
     with patch("boto3.client", side_effect=boto3_factory), patch(
         "ably.AblyRest", return_value=mock_ably_rest
-    ), patch("crawler.crawl_website_html", return_value="<html></html>"), patch(
-        "crawler.extract_css",
-        return_value={"css_links": [], "inline_styles": ["body{}"]},
-    ), patch(
-        "crawler.download_css_files", return_value=""
-    ), patch(
-        "html_regenerator.regenerate_html", return_value="<html></html>"
     ):
+        sys.modules.pop("handler", None)
+        sys.modules.pop("status_publisher", None)
+        yield importlib.import_module("handler")
 
-        # Re-import to pick up patches
-        if "handler" in sys.modules:
-            del sys.modules["handler"]
-        if "status_publisher" in sys.modules:
-            del sys.modules["status_publisher"]
-        import handler
 
-        result = handler.lambda_handler(make_event(), {})
+def patch_happy_dependencies(handler, downloaded_images=None):
+    return (
+        patch.object(handler, "crawl_website_html", return_value=RAW_HTML),
+        patch.object(handler, "extract_css", return_value=CSS_SOURCES),
+        patch.object(handler, "download_css_files", return_value=ALL_CSS),
+        patch.object(handler, "extract_image_urls", return_value=[]),
+        patch.object(handler, "download_images", return_value=downloaded_images or {}),
+        patch.object(handler, "prepare_inline_html", return_value=INLINE_HTML),
+    )
+
+
+def s3_objects_by_key(mock_s3):
+    return {call.kwargs["Key"]: call.kwargs for call in mock_s3.put_object.call_args_list}
+
+
+def published_steps(mock_channel):
+    return [call.args[1]["step"] for call in mock_channel.publish.call_args_list]
+
+
+def test_happy_path_preserves_artifact_and_queue_contracts():
+    mocks = make_mocks()
+    mock_s3, mock_dynamodb, mock_sqs, mock_secrets, mock_channel, mock_ably_rest, factory = mocks
+    downloaded = {
+        "https://example.com/logo.png": {
+            "content": b"png-bytes",
+            "content_type": "image/png",
+        }
+    }
+
+    with imported_handler(factory, mock_ably_rest) as handler:
+        crawl, extract, download_css, image_urls, download_images, prepare = patch_happy_dependencies(
+            handler, downloaded
+        )
+        with crawl, extract, download_css, image_urls, download_images, prepare as prepare_mock:
+            result = handler.lambda_handler(make_event(), {})
 
     assert result == {"batchItemFailures": []}
-
-    published_calls = mock_channel.publish.call_args_list
-    steps = [c.args[1]["step"] for c in published_calls]
-    assert steps == [
+    assert published_steps(mock_channel) == [
         "received",
         "crawling_html",
         "extracting_css",
         "extracting_images",
-        "regenerating_html",
         "queueing_ai",
-    ], f"Unexpected steps: {steps}"
+    ]
+    sequences = [call.args[1]["sequence"] for call in mock_channel.publish.call_args_list]
+    assert sequences == [1, 2, 3, 4, 5]
+    assert all(call.args[1]["status"] == "processing" for call in mock_channel.publish.call_args_list)
 
-    sequences = [c.args[1]["sequence"] for c in published_calls]
-    assert sequences == list(
-        range(1, len(steps) + 1)
-    ), "Sequences not monotonically increasing"
+    objects = s3_objects_by_key(mock_s3)
+    assert set(objects) == {
+        f"{WEBSITE_ID}/images/img-0.png",
+        f"{WEBSITE_ID}/index.html",
+        f"{WEBSITE_ID}/Regenerated-Index.html",
+        f"{WEBSITE_ID}/original-styles.css",
+    }
+    assert objects[f"{WEBSITE_ID}/index.html"]["Body"] == RAW_HTML.encode("utf-8")
+    assert objects[f"{WEBSITE_ID}/index.html"]["ContentType"] == "text/html; charset=utf-8"
+    assert objects[f"{WEBSITE_ID}/Regenerated-Index.html"]["Body"] == INLINE_HTML.encode("utf-8")
+    assert objects[f"{WEBSITE_ID}/Regenerated-Index.html"]["Body"] != RAW_HTML.encode("utf-8")
+    assert (
+        objects[f"{WEBSITE_ID}/Regenerated-Index.html"]["ContentType"]
+        == "text/html; charset=utf-8"
+    )
+    assert objects[f"{WEBSITE_ID}/original-styles.css"]["Body"] == ALL_CSS.encode("utf-8")
+    assert objects[f"{WEBSITE_ID}/original-styles.css"]["ContentType"] == "text/css; charset=utf-8"
+    assert isinstance(objects[f"{WEBSITE_ID}/index.html"]["Body"], bytes)
+    assert isinstance(objects[f"{WEBSITE_ID}/Regenerated-Index.html"]["Body"], bytes)
+    assert isinstance(objects[f"{WEBSITE_ID}/original-styles.css"]["Body"], bytes)
+    prepare_mock.assert_called_once_with(
+        RAW_HTML,
+        ALL_CSS,
+        URL,
+        {"https://example.com/logo.png": "./images/img-0.png"},
+    )
+    mock_dynamodb.put_item.assert_called_once()
+    mock_secrets.get_secret_value.assert_called_once_with(SecretId="test/ably-secret")
 
-    statuses = [c.args[1]["status"] for c in published_calls]
-    assert all(s == "processing" for s in statuses)
+    mock_sqs.send_message.assert_called_once()
+    queue_call = mock_sqs.send_message.call_args.kwargs
+    assert queue_call["QueueUrl"] == os.environ["SQS_QUEUE_URL"]
+    assert queue_call["MessageDeduplicationId"] == WEBSITE_ID
+    assert json.loads(queue_call["MessageBody"]) == {
+        "RegeneratedWebsiteId": WEBSITE_ID,
+        "RegeneratedWebsiteUrl": URL,
+        "RegenerationTheme": THEME,
+    }
 
-    assert mock_s3.put_object.call_count == 3  # index.html, original-styles.css, Regenerated-Index.html
-    assert mock_dynamodb.put_item.call_count == 1
-    assert mock_sqs.send_message.call_count == 1
-    print("test_happy_path_publishes_all_steps_in_order: PASSED")
+
+def test_processor_failure_is_a_batch_failure_and_does_not_queue_downstream():
+    mocks = make_mocks()
+    mock_s3, _, mock_sqs, _, mock_channel, mock_ably_rest, factory = mocks
+
+    with imported_handler(factory, mock_ably_rest) as handler:
+        crawl, extract, download_css, image_urls, download_images, _ = patch_happy_dependencies(handler)
+        with crawl, extract, download_css, image_urls, download_images, patch.object(
+            handler, "prepare_inline_html", side_effect=RuntimeError("premailer failed")
+        ):
+            result = handler.lambda_handler(make_event(), {})
+
+    assert result == {"batchItemFailures": [{"itemIdentifier": "msg-001"}]}
+    assert published_steps(mock_channel)[-1] == "failed"
+    failed = mock_channel.publish.call_args_list[-1].args[1]
+    assert failed["status"] == "failed"
+    assert failed["error"] == "premailer failed"
+    assert mock_sqs.send_message.call_count == 0
+    written_keys = {call.kwargs["Key"] for call in mock_s3.put_object.call_args_list}
+    assert f"{WEBSITE_ID}/index.html" not in written_keys
+    assert f"{WEBSITE_ID}/Regenerated-Index.html" not in written_keys
 
 
 def test_crawl_failure_publishes_failed():
-    """
-    Test the handler publishes failure status when HTML crawling fails.
+    mocks = make_mocks()
+    _, _, mock_sqs, _, mock_channel, mock_ably_rest, factory = mocks
 
-    Verifies:
-    1. When crawl_website_html raises an exception, handler propagates it
-    2. "failed" step is published before the exception propagates
-    3. Failed event has status="failed" and includes error message
-    """
-    mock_s3, mock_dynamodb, mock_sqs, mock_channel, mock_ably_rest, boto3_factory = (
-        make_mocks()
-    )
-
-    with patch("boto3.client", side_effect=boto3_factory), patch(
-        "ably.AblyRest", return_value=mock_ably_rest
-    ), patch("crawler.crawl_website_html", side_effect=Exception("timeout")):
-
-        if "handler" in sys.modules:
-            del sys.modules["handler"]
-        if "status_publisher" in sys.modules:
-            del sys.modules["status_publisher"]
-        import handler
-
-        result = handler.lambda_handler(make_event(), {})
-
-    assert result["batchItemFailures"] == [{"itemIdentifier": "msg-001"}]
-    steps = [c.args[1]["step"] for c in mock_channel.publish.call_args_list]
-    assert "failed" in steps
-    failed_event = next(
-        c.args[1]
-        for c in mock_channel.publish.call_args_list
-        if c.args[1]["step"] == "failed"
-    )
-    assert failed_event["status"] == "failed"
-    assert failed_event["error"] is not None
-    print("test_crawl_failure_publishes_failed: PASSED")
-
-
-def test_s3_failure_publishes_failed():
-    """
-    Test the handler publishes failure status when S3 operations fail.
-
-    Verifies:
-    1. When S3 put_object raises an exception, handler propagates it
-    2. "failed" step is published before the exception propagates
-    3. Failure occurs after HTML crawl and CSS extraction succeed
-    """
-    mock_s3, mock_dynamodb, mock_sqs, mock_channel, mock_ably_rest, boto3_factory = (
-        make_mocks()
-    )
-    mock_s3.put_object.side_effect = Exception("S3 unavailable")
-
-    with patch("boto3.client", side_effect=boto3_factory), patch(
-        "ably.AblyRest", return_value=mock_ably_rest
-    ), patch("crawler.crawl_website_html", return_value="<html></html>"), patch(
-        "crawler.extract_css", return_value={"css_links": [], "inline_styles": []}
-    ), patch(
-        "crawler.download_css_files", return_value=""
+    with imported_handler(factory, mock_ably_rest) as handler, patch.object(
+        handler, "crawl_website_html", side_effect=RuntimeError("timeout")
     ):
-
-        if "handler" in sys.modules:
-            del sys.modules["handler"]
-        if "status_publisher" in sys.modules:
-            del sys.modules["status_publisher"]
-        import handler
-
         result = handler.lambda_handler(make_event(), {})
 
-    assert result["batchItemFailures"] == [{"itemIdentifier": "msg-001"}]
-    steps = [c.args[1]["step"] for c in mock_channel.publish.call_args_list]
-    assert "failed" in steps
-    print("test_s3_failure_publishes_failed: PASSED")
+    assert result == {"batchItemFailures": [{"itemIdentifier": "msg-001"}]}
+    assert published_steps(mock_channel) == ["received", "crawling_html", "failed"]
+    assert mock_sqs.send_message.call_count == 0
 
 
 def test_oversized_css_file_publishes_failed():
-    """
-    Test the handler publishes failure status when a downloaded CSS file
-    exceeds the maximum allowed character limit.
+    mocks = make_mocks()
+    _, _, mock_sqs, _, mock_channel, mock_ably_rest, factory = mocks
+    error = ValueError("CSS file exceeds maximum allowed size")
 
-    Verifies:
-    1. When download_css_files raises ValueError for an oversized CSS file,
-       the handler propagates it as a batch item failure
-    2. "failed" step is published with status="failed" and an error message
-       describing the size-limit violation
-    """
-    mock_s3, mock_dynamodb, mock_sqs, mock_channel, mock_ably_rest, boto3_factory = (
-        make_mocks()
-    )
-
-    oversized_error = ValueError(
-        "CSS file https://example.com/big.css exceeds maximum allowed size "
-        "of 500000 characters (got 600000)"
-    )
-
-    with patch("boto3.client", side_effect=boto3_factory), patch(
-        "ably.AblyRest", return_value=mock_ably_rest
-    ), patch("crawler.crawl_website_html", return_value="<html></html>"), patch(
-        "crawler.extract_css",
-        return_value={"css_links": ["https://example.com/big.css"], "inline_styles": []},
-    ), patch(
-        "crawler.download_css_files", side_effect=oversized_error
+    with imported_handler(factory, mock_ably_rest) as handler, patch.object(
+        handler, "crawl_website_html", return_value=RAW_HTML
+    ), patch.object(handler, "extract_css", return_value=CSS_SOURCES), patch.object(
+        handler, "download_css_files", side_effect=error
     ):
-
-        if "handler" in sys.modules:
-            del sys.modules["handler"]
-        if "status_publisher" in sys.modules:
-            del sys.modules["status_publisher"]
-        import handler
-
         result = handler.lambda_handler(make_event(), {})
 
-    assert result["batchItemFailures"] == [{"itemIdentifier": "msg-001"}]
-    steps = [c.args[1]["step"] for c in mock_channel.publish.call_args_list]
-    assert "failed" in steps
-    failed_event = next(
-        c.args[1]
-        for c in mock_channel.publish.call_args_list
-        if c.args[1]["step"] == "failed"
-    )
-    assert failed_event["status"] == "failed"
-    assert "exceeds maximum allowed size" in failed_event["error"]
-    print("test_oversized_css_file_publishes_failed: PASSED")
+    assert result == {"batchItemFailures": [{"itemIdentifier": "msg-001"}]}
+    assert published_steps(mock_channel)[-1] == "failed"
+    assert "exceeds maximum allowed size" in mock_channel.publish.call_args_list[-1].args[1]["error"]
+    assert mock_sqs.send_message.call_count == 0
 
 
-def test_sequence_numbers_always_increase():
-    """
-    Test that sequence numbers monotonically increase across all updates.
+def test_s3_failure_publishes_failed_and_does_not_queue():
+    mocks = make_mocks()
+    mock_s3, _, mock_sqs, _, mock_channel, mock_ably_rest, factory = mocks
+    mock_s3.put_object.side_effect = RuntimeError("S3 unavailable")
 
-    Verifies:
-    1. Sequence numbers are strictly increasing (no duplicates)
-    2. Sequence numbers are sorted in published order
-    3. Critical for clients to maintain proper ordering of async updates
-    """
-    mock_s3, mock_dynamodb, mock_sqs, mock_channel, mock_ably_rest, boto3_factory = (
-        make_mocks()
-    )
+    with imported_handler(factory, mock_ably_rest) as handler:
+        patches = patch_happy_dependencies(handler)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+            result = handler.lambda_handler(make_event(), {})
 
-    with patch("boto3.client", side_effect=boto3_factory), patch(
-        "ably.AblyRest", return_value=mock_ably_rest
-    ), patch("crawler.crawl_website_html", return_value="<html></html>"), patch(
-        "crawler.extract_css", return_value={"css_links": [], "inline_styles": []}
-    ), patch(
-        "crawler.download_css_files", return_value=""
-    ), patch(
-        "html_regenerator.regenerate_html", return_value="<html></html>"
-    ):
-
-        if "handler" in sys.modules:
-            del sys.modules["handler"]
-        if "status_publisher" in sys.modules:
-            del sys.modules["status_publisher"]
-        import handler
-
-        handler.lambda_handler(make_event(), {})
-
-    seqs = [c.args[1]["sequence"] for c in mock_channel.publish.call_args_list]
-    assert seqs == sorted(seqs) and len(seqs) == len(set(seqs))
-    print("test_sequence_numbers_always_increase: PASSED")
+    assert result == {"batchItemFailures": [{"itemIdentifier": "msg-001"}]}
+    assert published_steps(mock_channel)[-1] == "failed"
+    assert mock_sqs.send_message.call_count == 0
 
 
-def test_retry_continues_sequence_from_existing():
-    """
-    Verify that a retry on the same RegeneratedWebsiteId continues sequence
-    numbers from the existing CurrentSequence in DynamoDB rather than restarting
-    at 1, so the frontend's sequence deduplication does not discard retry events.
-    """
-    mock_s3, mock_dynamodb, mock_sqs, mock_channel, mock_ably_rest, boto3_factory = (
-        make_mocks()
-    )
-
-    PRIOR_SEQ = 5
+def test_sequence_numbers_are_monotonic_and_retry_from_existing_value():
+    mocks = make_mocks()
+    _, mock_dynamodb, _, _, mock_channel, mock_ably_rest, factory = mocks
     mock_dynamodb.get_item.return_value = {
-        "Item": {
-            "RegeneratedWebsiteId": {"S": WEBSITE_ID},
-            "RegeneratedWebsiteUrl": {"S": URL},
-            "CurrentSequence": {"N": str(PRIOR_SEQ)},
-        }
+        "Item": {"CurrentSequence": {"N": "5"}}
     }
 
-    with patch("boto3.client", side_effect=boto3_factory), patch(
-        "ably.AblyRest", return_value=mock_ably_rest
-    ), patch("crawler.crawl_website_html", return_value="<html></html>"), patch(
-        "crawler.extract_css",
-        return_value={"css_links": [], "inline_styles": ["body{}"]},
-    ), patch(
-        "crawler.download_css_files", return_value=""
-    ), patch(
-        "html_regenerator.regenerate_html",
-        return_value="<html></html>",
-    ):
-
-        if "handler" in sys.modules:
-            del sys.modules["handler"]
-        if "status_publisher" in sys.modules:
-            del sys.modules["status_publisher"]
-        import handler
-
-        result = handler.lambda_handler(make_event(), {})
+    with imported_handler(factory, mock_ably_rest) as handler:
+        patches = patch_happy_dependencies(handler)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+            result = handler.lambda_handler(make_event(), {})
 
     assert result == {"batchItemFailures": []}
-
-    seqs = [c.args[1]["sequence"] for c in mock_channel.publish.call_args_list]
-
-    assert seqs[0] == PRIOR_SEQ + 1, f"First seq should be {PRIOR_SEQ + 1}, got {seqs[0]}"
-    assert all(s > PRIOR_SEQ for s in seqs), f"All seqs must be > {PRIOR_SEQ}: {seqs}"
-    assert seqs == sorted(seqs) and len(seqs) == len(set(seqs)), "Sequences not strictly increasing"
-
-    print("test_retry_continues_sequence_from_existing: PASSED")
-
-
-if __name__ == "__main__":
-    test_happy_path_publishes_all_steps_in_order()
-    test_crawl_failure_publishes_failed()
-    test_oversized_css_file_publishes_failed()
-    test_s3_failure_publishes_failed()
-    test_sequence_numbers_always_increase()
-    test_retry_continues_sequence_from_existing()
-    print("All tests passed.")
+    sequences = [call.args[1]["sequence"] for call in mock_channel.publish.call_args_list]
+    assert sequences == [6, 7, 8, 9, 10]
+    assert sequences == sorted(sequences)
+    assert len(sequences) == len(set(sequences))

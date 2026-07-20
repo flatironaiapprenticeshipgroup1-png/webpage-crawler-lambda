@@ -29,20 +29,38 @@ def crawl_website_html(url: str):
     return html
 
 
-def extract_css(html: str, base_url: str) -> dict:
+def extract_css(html: str, base_url: str) -> list[dict[str, str]]:
     print("Parsing HTML to extract CSS references")
     soup = BeautifulSoup(html, "html.parser")
-    css_links = [urljoin(base_url, link["href"]) for link in soup.find_all("link", rel="stylesheet") if link.get("href")]
-    inline_styles = [s for s in (style.string for style in soup.find_all("style")) if s]
+    sources = []
 
-    return {"css_links": css_links, "inline_styles": inline_styles}
+    for tag in soup.find_all(["link", "style"]):
+        if tag.name == "style":
+            css = tag.string
+            if css:
+                sources.append({"kind": "embedded", "css": str(css)})
+            continue
+
+        rel = tag.get("rel", [])
+        if isinstance(rel, str):
+            rel = rel.split()
+        if tag.get("href") and any(token.lower() == "stylesheet" for token in rel):
+            sources.append({"kind": "external", "url": urljoin(base_url, tag["href"])})
+
+    return sources
 
 
-def download_css_files(css_links: list) -> str:
-    print(f"Downloading {len(css_links)} external CSS files")
+def download_css_files(css_sources: list[dict[str, str]]) -> str:
+    external_count = sum(source["kind"] == "external" for source in css_sources)
+    print(f"Downloading {external_count} external CSS files")
     max_css_file_chars = _get_max_css_file_chars()
-    combined = ""
-    for link in css_links:
+    combined = []
+    for source in css_sources:
+        if source["kind"] == "embedded":
+            combined.append(source["css"])
+            continue
+
+        link = source["url"]
         try:
             response = requests.get(link, timeout=10)
             response.raise_for_status()
@@ -56,6 +74,6 @@ def download_css_files(css_links: list) -> str:
                 f"{max_css_file_chars} characters (got {len(response.text)})"
             )
 
-        combined += response.text + "\n"
+        combined.append(response.text)
         print(f"Downloaded CSS from {link} ({len(response.text)} bytes)")
-    return combined
+    return "\n".join(combined)

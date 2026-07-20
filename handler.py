@@ -1,24 +1,17 @@
 import json
-import logging
 import mimetypes
 import os
 import threading
 import uuid
 
 import boto3
-from openai import OpenAI
-
-import html_regenerator
 from crawler import crawl_website_html, extract_css, download_css_files
+from html_processor import prepare_inline_html
 from image_downloader import extract_image_urls, download_images
 
 from status_publisher import get_current_sequence, publish_status_update
 
 
-logging.getLogger().setLevel(logging.INFO)
-logger = logging.getLogger(__name__)
-
-secrets_client = boto3.client("secretsmanager")
 s3 = boto3.client("s3")
 dynamodb = boto3.client("dynamodb")
 sqs = boto3.client("sqs")
@@ -58,11 +51,6 @@ def lambda_handler(event, context):
             table = os.environ["DYNAMODB_TABLE_NAME"]
             queue_url = os.environ["SQS_QUEUE_URL"]
 
-            secret = json.loads(
-                secrets_client.get_secret_value(SecretId=os.environ["SECRET_NAME"])["SecretString"]
-            )
-            openai_client = OpenAI(api_key=secret["OpenAIAPIKey"])
-
             print(f"Processing job {website_id} for {url}")
             publish("received", "processing", "Regeneration request received")
 
@@ -72,9 +60,8 @@ def lambda_handler(event, context):
 
             print("Extracting CSS")
             publish("extracting_css", "processing", "Extracting CSS references")
-            css_info = extract_css(html, url)
-            external_css = download_css_files(css_info["css_links"])
-            all_css = external_css + "\n".join(css_info["inline_styles"])
+            css_sources = extract_css(html, url)
+            all_css = download_css_files(css_sources)
             if not all_css.strip():
                 all_css = "/* No source CSS found — generate complete theme stylesheet from scratch */\nbody {}\n"
 
@@ -96,9 +83,28 @@ def lambda_handler(event, context):
                 )
                 image_map[original_url] = f"./images/{key_name}"
 
+            print("Preparing inline HTML")
+            inline_html = prepare_inline_html(html, all_css, url, image_map)
+
             print("Creating HTML and CSS files")
-            s3.put_object(Bucket=bucket, Key=f"{website_id}/index.html", Body=html, ContentType="text/html")
-            s3.put_object(Bucket=bucket, Key=f"{website_id}/original-styles.css", Body=all_css, ContentType="text/css")
+            s3.put_object(
+                Bucket=bucket,
+                Key=f"{website_id}/index.html",
+                Body=html.encode("utf-8"),
+                ContentType="text/html; charset=utf-8",
+            )
+            s3.put_object(
+                Bucket=bucket,
+                Key=f"{website_id}/Regenerated-Index.html",
+                Body=inline_html.encode("utf-8"),
+                ContentType="text/html; charset=utf-8",
+            )
+            s3.put_object(
+                Bucket=bucket,
+                Key=f"{website_id}/original-styles.css",
+                Body=all_css.encode("utf-8"),
+                ContentType="text/css; charset=utf-8",
+            )
             dynamodb.put_item(
                 TableName=table,
                 Item={
@@ -107,29 +113,6 @@ def lambda_handler(event, context):
                     "RegenerationTheme": {"S": theme},
                 },
             )
-
-            print("Regenerating HTML")
-            publish("regenerating_html", "processing", "AI regenerating HTML structure")
-
-            def on_chunk_complete(chunk_index, total_chunks):
-                publish(
-                    "regenerating_html_chunks_completed",
-                    "processing",
-                    f"Regenerated HTML chunk {chunk_index + 1} of {total_chunks}",
-                )
-
-            regenerated_html = html_regenerator.regenerate_html(
-                openai_client, html, theme, on_chunk_complete, base_url=url, image_map=image_map,
-            )
-
-            s3.put_object(
-                Bucket=bucket,
-                Key=f"{website_id}/Regenerated-Index.html",
-                Body=regenerated_html.encode("utf-8"),
-                ContentType="text/html; charset=utf-8",
-                CacheControl="no-store, no-cache, must-revalidate",
-            )
-            logger.info("Regenerated HTML saved to S3 for website ID %s", website_id)
 
             print("Queuing AI regeneration step")
             publish("queueing_ai", "processing", "Queuing AI regeneration")
