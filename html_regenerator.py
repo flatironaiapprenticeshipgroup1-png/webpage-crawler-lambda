@@ -27,6 +27,26 @@ def _unescape_numeric_entities(text: str) -> str:
     """
     return _NUMERIC_ENTITY_RE.sub(lambda m: html_lib.unescape(m.group(0)), text)
 
+
+_LEADING_CODE_FENCE_RE = re.compile(r"^\s*```[a-zA-Z0-9_-]*[ \t]*\n")
+_TRAILING_CODE_FENCE_RE = re.compile(r"\n?[ \t]*```\s*$")
+
+
+def _strip_code_fences(text: str) -> str:
+    """
+    Strips a leading ```html-style fence and/or trailing ``` fence the model
+    added despite being told not to. Otherwise the fence markers get spliced
+    into the document as literal text, since chunk output is inserted as-is.
+    The two fences are stripped independently so a response truncated at
+    max_tokens before the model closed its fence still has the leading one
+    removed.
+    """
+    if not text:
+        return text
+    stripped = _LEADING_CODE_FENCE_RE.sub("", text, count=1)
+    stripped = _TRAILING_CODE_FENCE_RE.sub("", stripped, count=1)
+    return stripped
+
 _HEAD_LINK_RELS_TO_STRIP = {
     "preload", "prefetch", "dns-prefetch", "preconnect",
     "canonical", "alternate", "manifest", "stylesheet",
@@ -256,7 +276,7 @@ def _regenerate_chunk(
             chunk_index + 1, total_chunks, finish_reason,
         )
 
-    return _unescape_numeric_entities(response.choices[0].message.content)
+    return _unescape_numeric_entities(_strip_code_fences(response.choices[0].message.content))
 
 
 def regenerate_html(
