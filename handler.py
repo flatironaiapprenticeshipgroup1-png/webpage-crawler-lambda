@@ -5,13 +5,16 @@ import threading
 import uuid
 
 import boto3
+from openai import OpenAI
 from crawler import crawl_website_html, extract_css, download_css_files
-from html_processor import prepare_inline_html
+import html_regenerator
+from html_processor import inline_svg_styles
 from image_downloader import extract_image_urls, download_images
 
 from status_publisher import get_current_sequence, publish_status_update
 
 
+secrets_client = boto3.client("secretsmanager")
 s3 = boto3.client("s3")
 dynamodb = boto3.client("dynamodb")
 sqs = boto3.client("sqs")
@@ -51,6 +54,11 @@ def lambda_handler(event, context):
             table = os.environ["DYNAMODB_TABLE_NAME"]
             queue_url = os.environ["SQS_QUEUE_URL"]
 
+            secret = json.loads(
+                secrets_client.get_secret_value(SecretId=os.environ["SECRET_NAME"])["SecretString"]
+            )
+            openai_client = OpenAI(api_key=secret["OpenAIAPIKey"])
+
             print(f"Processing job {website_id} for {url}")
             publish("received", "processing", "Regeneration request received")
 
@@ -83,20 +91,14 @@ def lambda_handler(event, context):
                 )
                 image_map[original_url] = f"./images/{key_name}"
 
-            print("Preparing inline HTML")
-            inline_html = prepare_inline_html(html, all_css, url, image_map)
+            print("Inlining SVG styles")
+            svg_prepared_html = inline_svg_styles(html, all_css)
 
             print("Creating HTML and CSS files")
             s3.put_object(
                 Bucket=bucket,
                 Key=f"{website_id}/index.html",
                 Body=html.encode("utf-8"),
-                ContentType="text/html; charset=utf-8",
-            )
-            s3.put_object(
-                Bucket=bucket,
-                Key=f"{website_id}/Regenerated-Index.html",
-                Body=inline_html.encode("utf-8"),
                 ContentType="text/html; charset=utf-8",
             )
             s3.put_object(
@@ -113,6 +115,29 @@ def lambda_handler(event, context):
                     "RegenerationTheme": {"S": theme},
                 },
             )
+
+            print("Regenerating HTML")
+            publish("regenerating_html", "processing", "AI regenerating HTML structure")
+
+            def on_chunk_complete(chunk_index, total_chunks):
+                publish(
+                    "regenerating_html_chunks_completed",
+                    "processing",
+                    f"Regenerated HTML chunk {chunk_index + 1} of {total_chunks}",
+                )
+
+            regenerated_html = html_regenerator.regenerate_html(
+                openai_client, svg_prepared_html, theme, on_chunk_complete, base_url=url, image_map=image_map,
+            )
+
+            s3.put_object(
+                Bucket=bucket,
+                Key=f"{website_id}/Regenerated-Index.html",
+                Body=regenerated_html.encode("utf-8"),
+                ContentType="text/html; charset=utf-8",
+                CacheControl="no-store, no-cache, must-revalidate",
+            )
+            print(f"Regenerated HTML saved to S3 for website ID {website_id}")
 
             print("Queuing AI regeneration step")
             publish("queueing_ai", "processing", "Queuing AI regeneration")

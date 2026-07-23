@@ -4,3 +4,4 @@ requests==2.34.2
 boto3==1.43.10
 ably>=2.0.0
 premailer==3.10.0
+openai

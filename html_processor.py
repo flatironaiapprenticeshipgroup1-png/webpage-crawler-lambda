@@ -1,79 +1,29 @@
-"""Prepare crawled HTML for downstream CSS regeneration."""
+"""Inline CSS onto <svg> elements only, ahead of AI HTML regeneration.
 
-import re
-from urllib.parse import urljoin
+Everything outside <svg> subtrees keeps its class-based styling untouched —
+the AI HTML regenerator (html_regenerator.py) preserves those classes and
+the AI CSS lambda regenerates the stylesheet that targets them. SVGs are the
+one case inlined here because selector-based CSS rewrites tend to mangle svg
+styling; their classes are stripped and their computed style is baked
+in as a style="..." attribute instead.
+"""
 
 from bs4 import BeautifulSoup
 from cssutils.css import CSSStyleDeclaration
 from premailer import transform
 
 
-_HEAD_LINK_RELS_TO_REMOVE = {
-    "preload",
-    "prefetch",
-    "dns-prefetch",
-    "preconnect",
-    "canonical",
-    "alternate",
-    "manifest",
-    "stylesheet",
-}
-_HTML_DOCTYPE_RE = re.compile(r"<!doctype\s+html(?:\s+[^>]*)?>", re.IGNORECASE)
-_ANY_DOCTYPE_RE = re.compile(r"<!doctype[^>]*>", re.IGNORECASE)
+def _merge_original_inline_style(generated_css: str, original_css: str) -> str:
+    generated = CSSStyleDeclaration(cssText=generated_css, validating=False)
+    original = CSSStyleDeclaration(cssText=original_css, validating=False)
 
-
-def _is_stylesheet_link(tag) -> bool:
-    rel = tag.get("rel", [])
-    if isinstance(rel, str):
-        rel = rel.split()
-    return any(token.lower() == "stylesheet" for token in rel)
-
-
-def _rewrite_images(soup: BeautifulSoup, base_url: str, image_map: dict[str, str]) -> None:
-    for image in soup.find_all("img"):
-        src = image.get("src", "")
-        if not src or src.startswith("data:"):
+    for declaration in original:
+        generated_priority = generated.getPropertyPriority(declaration.name).lower()
+        original_priority = declaration.priority.lower()
+        if generated_priority == "important" and original_priority != "important":
             continue
-        absolute_url = urljoin(base_url, src)
-        image["src"] = image_map.get(absolute_url, absolute_url)
-
-
-def _clean_head(soup: BeautifulSoup) -> None:
-    head = soup.find("head")
-    if head is None:
-        return
-
-    for tag in head.find_all(["style", "noscript"]):
-        tag.decompose()
-
-    for tag in head.find_all("link"):
-        rel = tag.get("rel", [])
-        if isinstance(rel, str):
-            rel = rel.split()
-        normalized_rel = " ".join(rel).lower()
-        if normalized_rel in _HEAD_LINK_RELS_TO_REMOVE:
-            tag.decompose()
-
-    for tag in head.find_all("meta"):
-        property_value = tag.get("property", "")
-        name = tag.get("name", "").lower()
-        http_equiv = tag.get("http-equiv", "")
-        if (
-            property_value.startswith("og:")
-            or name.startswith("twitter:")
-            or http_equiv
-            or name == "robots"
-        ):
-            tag.decompose()
-
-
-def _mark_preserved_body_styles(soup: BeautifulSoup) -> None:
-    """Keep body-level CSS elements outside Premailer's cleanup boundary."""
-    for tag in soup.find_all(["style", "link"]):
-        if tag.find_parent("head") is not None:
-            continue
-        if tag.name == "style" or _is_stylesheet_link(tag):
-            tag["data-premailer"] = "ignore"
+        generated.setProperty(declaration.name, declaration.value, declaration.priority)
+    return generated.cssText
 
 
 def _detach_inline_styles(soup: BeautifulSoup) -> tuple[str, dict[str, str]]:
@@ -98,19 +48,6 @@ def _detach_inline_styles(soup: BeautifulSoup) -> tuple[str, dict[str, str]]:
     return attribute, original_styles
 
 
-def _merge_original_inline_style(generated_css: str, original_css: str) -> str:
-    generated = CSSStyleDeclaration(cssText=generated_css, validating=False)
-    original = CSSStyleDeclaration(cssText=original_css, validating=False)
-
-    for declaration in original:
-        generated_priority = generated.getPropertyPriority(declaration.name).lower()
-        original_priority = declaration.priority.lower()
-        if generated_priority == "important" and original_priority != "important":
-            continue
-        generated.setProperty(declaration.name, declaration.value, declaration.priority)
-    return generated.cssText
-
-
 def _restore_inline_styles_and_remove_markers(
     html: str,
     inline_attribute: str,
@@ -125,65 +62,43 @@ def _restore_inline_styles_and_remove_markers(
         elif tag.has_attr("style"):
             del tag["style"]
         del tag[inline_attribute]
-
-    for tag in soup.find_all(["style", "link"], attrs={"data-premailer": "ignore"}):
-        if tag.find_parent("head") is None:
-            del tag["data-premailer"]
     return str(soup)
 
 
-def _preserve_html_doctype(source_html: str, output_html: str) -> str:
-    if not _HTML_DOCTYPE_RE.search(source_html):
-        return output_html
+def inline_svg_styles(html: str, css: str) -> str:
+    """Inline ``css`` onto every <svg> subtree in ``html`` and strip their classes.
 
-    if _ANY_DOCTYPE_RE.search(output_html):
-        return _ANY_DOCTYPE_RE.sub("<!DOCTYPE html>", output_html, count=1)
-    return f"<!DOCTYPE html>\n{output_html}"
-
-
-def prepare_inline_html(
-    html: str,
-    css: str,
-    base_url: str,
-    image_map: dict[str, str],
-) -> str:
-    """Clean the source head, rewrite image sources, and inline source CSS.
-
-    Relative image URLs intentionally resolve against ``base_url`` rather than a
-    document ``<base>`` element. The ``<base>`` element itself is preserved.
-    Relative CSS assets are not rebased; the combined source CSS is retained as a
-    separate artifact for downstream processing.
+    Each <svg> is inlined in isolation (as its own fragment) so the rest of the
+    document's classes, stylesheet links, and head content are left completely
+    untouched — those stay class-based for the AI HTML/CSS regeneration passes.
     """
     soup = BeautifulSoup(html, "html.parser")
-    _rewrite_images(soup, base_url, image_map)
-    _clean_head(soup)
-    _mark_preserved_body_styles(soup)
-    inline_attribute, original_styles = _detach_inline_styles(soup)
+    svgs = soup.find_all("svg")
+    if not svgs:
+        return html
 
-    output = transform(
-        str(soup),
-        css_text=css,
-        allow_network=False,
-        disable_link_rewrites=True,
-        remove_classes=False,
-        keep_style_tags=False,
-        disable_leftover_css=True,
-        disable_validation=True,
-        strip_important=False,
-        align_floating_images=False,
-        disable_basic_attributes=[
-            "background",
-            "bgcolor",
-            "width",
-            "height",
-            "align",
-            "valign",
-        ],
-    )
+    for svg in svgs:
+        svg_soup = BeautifulSoup(str(svg), "html.parser")
+        inline_attribute, original_styles = _detach_inline_styles(svg_soup)
 
-    output = _restore_inline_styles_and_remove_markers(
-        output,
-        inline_attribute,
-        original_styles,
-    )
-    return _preserve_html_doctype(html, output)
+        inlined = transform(
+            str(svg_soup),
+            css_text=css,
+            allow_network=False,
+            disable_link_rewrites=True,
+            remove_classes=True,
+            keep_style_tags=False,
+            disable_leftover_css=True,
+            disable_validation=True,
+            strip_important=False,
+            align_floating_images=False,
+        )
+        inlined = _restore_inline_styles_and_remove_markers(
+            inlined, inline_attribute, original_styles,
+        )
+
+        new_svg = BeautifulSoup(inlined, "html.parser").find("svg")
+        if new_svg is not None:
+            svg.replace_with(new_svg)
+
+    return str(soup)

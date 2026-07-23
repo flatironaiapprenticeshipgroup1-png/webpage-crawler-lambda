@@ -10,12 +10,20 @@ os.environ["S3_BUCKET_NAME"] = "test-bucket"
 os.environ["DYNAMODB_TABLE_NAME"] = "test-table"
 os.environ["SQS_QUEUE_URL"] = "https://sqs.us-east-1.amazonaws.com/123/test.fifo"
 os.environ["ABLY_SECRET_NAME"] = "test/ably-secret"
+os.environ["SECRET_NAME"] = "test/openai-secret"
 
 WEBSITE_ID = "abc-123"
 URL = "https://example.com"
 THEME = "dark"
 RAW_HTML = "<!DOCTYPE html><html><body><p>Raw crawl</p></body></html>"
-INLINE_HTML = "<!DOCTYPE html><html><body><p style=\"color: red\">Processed ✓</p></body></html>"
+SVG_PREPARED_HTML = (
+    "<!DOCTYPE html><html><body><p>Raw crawl</p>"
+    '<svg style="fill:red"><path/></svg></body></html>'
+)
+REGENERATED_HTML = (
+    '<!DOCTYPE html><html><head><link rel="stylesheet" '
+    'href="./Regenerated-Styles.css"></head><body><p>Themed</p></body></html>'
+)
 CSS_SOURCES = [{"kind": "embedded", "css": "p { color: red; }"}]
 ALL_CSS = "p { color: red; }"
 
@@ -46,7 +54,9 @@ def make_mocks():
     mock_sqs = MagicMock()
     mock_secrets = MagicMock()
     mock_secrets.get_secret_value.return_value = {
-        "SecretString": json.dumps({"AblyApiKey": "fake-key"})
+        "SecretString": json.dumps(
+            {"AblyApiKey": "fake-key", "OpenAIAPIKey": "fake-openai-key"}
+        )
     }
 
     def boto3_client_factory(service, **kwargs):
@@ -79,17 +89,22 @@ def imported_handler(boto3_factory, mock_ably_rest):
     ):
         sys.modules.pop("handler", None)
         sys.modules.pop("status_publisher", None)
-        yield importlib.import_module("handler")
+        handler = importlib.import_module("handler")
+        with patch.object(handler, "OpenAI", return_value=MagicMock()):
+            yield handler
 
 
-def patch_happy_dependencies(handler, downloaded_images=None):
+def patch_happy_dependencies(handler, downloaded_images=None, regenerate_html_kwargs=None):
+    regenerate_html_kwargs = regenerate_html_kwargs or {}
+    regenerate_html_kwargs.setdefault("return_value", REGENERATED_HTML)
     return (
         patch.object(handler, "crawl_website_html", return_value=RAW_HTML),
         patch.object(handler, "extract_css", return_value=CSS_SOURCES),
         patch.object(handler, "download_css_files", return_value=ALL_CSS),
         patch.object(handler, "extract_image_urls", return_value=[]),
         patch.object(handler, "download_images", return_value=downloaded_images or {}),
-        patch.object(handler, "prepare_inline_html", return_value=INLINE_HTML),
+        patch.object(handler, "inline_svg_styles", return_value=SVG_PREPARED_HTML),
+        patch.object(handler.html_regenerator, "regenerate_html", **regenerate_html_kwargs),
     )
 
 
@@ -111,11 +126,18 @@ def test_happy_path_preserves_artifact_and_queue_contracts():
         }
     }
 
+    def fake_regenerate_html(client, html, theme, on_chunk_complete, base_url=None, image_map=None):
+        on_chunk_complete(0, 2)
+        on_chunk_complete(1, 2)
+        return REGENERATED_HTML
+
     with imported_handler(factory, mock_ably_rest) as handler:
-        crawl, extract, download_css, image_urls, download_images, prepare = patch_happy_dependencies(
-            handler, downloaded
+        crawl, extract, download_css, image_urls, download_images, inline_svg, regen = (
+            patch_happy_dependencies(
+                handler, downloaded, regenerate_html_kwargs={"side_effect": fake_regenerate_html}
+            )
         )
-        with crawl, extract, download_css, image_urls, download_images, prepare as prepare_mock:
+        with crawl, extract, download_css, image_urls, download_images, inline_svg as inline_svg_mock, regen as regen_mock:
             result = handler.lambda_handler(make_event(), {})
 
     assert result == {"batchItemFailures": []}
@@ -124,10 +146,13 @@ def test_happy_path_preserves_artifact_and_queue_contracts():
         "crawling_html",
         "extracting_css",
         "extracting_images",
+        "regenerating_html",
+        "regenerating_html_chunks_completed",
+        "regenerating_html_chunks_completed",
         "queueing_ai",
     ]
     sequences = [call.args[1]["sequence"] for call in mock_channel.publish.call_args_list]
-    assert sequences == [1, 2, 3, 4, 5]
+    assert sequences == list(range(1, len(sequences) + 1))
     assert all(call.args[1]["status"] == "processing" for call in mock_channel.publish.call_args_list)
 
     objects = s3_objects_by_key(mock_s3)
@@ -139,7 +164,7 @@ def test_happy_path_preserves_artifact_and_queue_contracts():
     }
     assert objects[f"{WEBSITE_ID}/index.html"]["Body"] == RAW_HTML.encode("utf-8")
     assert objects[f"{WEBSITE_ID}/index.html"]["ContentType"] == "text/html; charset=utf-8"
-    assert objects[f"{WEBSITE_ID}/Regenerated-Index.html"]["Body"] == INLINE_HTML.encode("utf-8")
+    assert objects[f"{WEBSITE_ID}/Regenerated-Index.html"]["Body"] == REGENERATED_HTML.encode("utf-8")
     assert objects[f"{WEBSITE_ID}/Regenerated-Index.html"]["Body"] != RAW_HTML.encode("utf-8")
     assert (
         objects[f"{WEBSITE_ID}/Regenerated-Index.html"]["ContentType"]
@@ -150,14 +175,19 @@ def test_happy_path_preserves_artifact_and_queue_contracts():
     assert isinstance(objects[f"{WEBSITE_ID}/index.html"]["Body"], bytes)
     assert isinstance(objects[f"{WEBSITE_ID}/Regenerated-Index.html"]["Body"], bytes)
     assert isinstance(objects[f"{WEBSITE_ID}/original-styles.css"]["Body"], bytes)
-    prepare_mock.assert_called_once_with(
-        RAW_HTML,
-        ALL_CSS,
-        URL,
-        {"https://example.com/logo.png": "./images/img-0.png"},
-    )
+
+    inline_svg_mock.assert_called_once_with(RAW_HTML, ALL_CSS)
+
+    regen_call = regen_mock.call_args
+    assert regen_call.args[1] == SVG_PREPARED_HTML
+    assert regen_call.args[2] == THEME
+    assert regen_call.kwargs["base_url"] == URL
+    assert regen_call.kwargs["image_map"] == {"https://example.com/logo.png": "./images/img-0.png"}
+
     mock_dynamodb.put_item.assert_called_once()
-    mock_secrets.get_secret_value.assert_called_once_with(SecretId="test/ably-secret")
+
+    secret_ids = {call.kwargs["SecretId"] for call in mock_secrets.get_secret_value.call_args_list}
+    assert secret_ids == {"test/openai-secret", "test/ably-secret"}
 
     mock_sqs.send_message.assert_called_once()
     queue_call = mock_sqs.send_message.call_args.kwargs
@@ -170,14 +200,14 @@ def test_happy_path_preserves_artifact_and_queue_contracts():
     }
 
 
-def test_processor_failure_is_a_batch_failure_and_does_not_queue_downstream():
+def test_svg_inlining_failure_is_a_batch_failure_and_does_not_queue_downstream():
     mocks = make_mocks()
     mock_s3, _, mock_sqs, _, mock_channel, mock_ably_rest, factory = mocks
 
     with imported_handler(factory, mock_ably_rest) as handler:
-        crawl, extract, download_css, image_urls, download_images, _ = patch_happy_dependencies(handler)
-        with crawl, extract, download_css, image_urls, download_images, patch.object(
-            handler, "prepare_inline_html", side_effect=RuntimeError("premailer failed")
+        crawl, extract, download_css, image_urls, download_images, _, regen = patch_happy_dependencies(handler)
+        with crawl, extract, download_css, image_urls, download_images, regen, patch.object(
+            handler, "inline_svg_styles", side_effect=RuntimeError("premailer failed")
         ):
             result = handler.lambda_handler(make_event(), {})
 
@@ -189,6 +219,24 @@ def test_processor_failure_is_a_batch_failure_and_does_not_queue_downstream():
     assert mock_sqs.send_message.call_count == 0
     written_keys = {call.kwargs["Key"] for call in mock_s3.put_object.call_args_list}
     assert f"{WEBSITE_ID}/index.html" not in written_keys
+    assert f"{WEBSITE_ID}/Regenerated-Index.html" not in written_keys
+
+
+def test_html_regeneration_failure_is_a_batch_failure_and_does_not_queue_downstream():
+    mocks = make_mocks()
+    mock_s3, _, mock_sqs, _, mock_channel, mock_ably_rest, factory = mocks
+
+    with imported_handler(factory, mock_ably_rest) as handler:
+        crawl, extract, download_css, image_urls, download_images, inline_svg, _ = patch_happy_dependencies(handler)
+        with crawl, extract, download_css, image_urls, download_images, inline_svg, patch.object(
+            handler.html_regenerator, "regenerate_html", side_effect=RuntimeError("openai failed")
+        ):
+            result = handler.lambda_handler(make_event(), {})
+
+    assert result == {"batchItemFailures": [{"itemIdentifier": "msg-001"}]}
+    assert published_steps(mock_channel)[-1] == "failed"
+    assert mock_sqs.send_message.call_count == 0
+    written_keys = {call.kwargs["Key"] for call in mock_s3.put_object.call_args_list}
     assert f"{WEBSITE_ID}/Regenerated-Index.html" not in written_keys
 
 
@@ -231,7 +279,7 @@ def test_s3_failure_publishes_failed_and_does_not_queue():
 
     with imported_handler(factory, mock_ably_rest) as handler:
         patches = patch_happy_dependencies(handler)
-        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
             result = handler.lambda_handler(make_event(), {})
 
     assert result == {"batchItemFailures": [{"itemIdentifier": "msg-001"}]}
@@ -248,11 +296,11 @@ def test_sequence_numbers_are_monotonic_and_retry_from_existing_value():
 
     with imported_handler(factory, mock_ably_rest) as handler:
         patches = patch_happy_dependencies(handler)
-        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
             result = handler.lambda_handler(make_event(), {})
 
     assert result == {"batchItemFailures": []}
     sequences = [call.args[1]["sequence"] for call in mock_channel.publish.call_args_list]
-    assert sequences == [6, 7, 8, 9, 10]
+    assert sequences == list(range(6, 6 + len(sequences)))
     assert sequences == sorted(sequences)
     assert len(sequences) == len(set(sequences))
