@@ -112,3 +112,42 @@ def test_premailer_failure_is_propagated():
     with patch("html_processor.transform", side_effect=RuntimeError("premailer failed")):
         with pytest.raises(RuntimeError, match="premailer failed"):
             inline_svg_styles(html, ".icon { fill: blue; }")
+
+
+def test_multiple_svgs_only_invoke_premailer_once():
+    from html_processor import transform as real_transform
+
+    html = (
+        '<html><body>'
+        '<svg class="a"><path/></svg>'
+        '<svg class="b"><path/></svg>'
+        '<svg class="c"><path/></svg>'
+        '</body></html>'
+    )
+    css = ".a { fill: red; } .b { fill: green; } .c { fill: blue; }"
+
+    with patch("html_processor.transform", wraps=real_transform) as mocked_transform:
+        result = inline_svg_styles(html, css)
+
+    assert mocked_transform.call_count == 1
+    svgs = parse(result).find_all("svg")
+    assert len(svgs) == 3
+    assert "fill:red" in svgs[0]["style"].replace(" ", "")
+    assert "fill:green" in svgs[1]["style"].replace(" ", "")
+    assert "fill:blue" in svgs[2]["style"].replace(" ", "")
+
+
+def test_merge_preserves_modern_css_syntax_cssutils_cannot_parse():
+    html = (
+        '<html><body><svg class="icon" '
+        'style="color: hsl(var(--h), calc(var(--s) * 1%), 50%); border: 1px solid #0000;">'
+        '<path/></svg></body></html>'
+    )
+    css = ".icon { fill: blue !important; }"
+
+    svg = parse(inline_svg_styles(html, css)).find("svg")
+    style = svg["style"]
+
+    assert "hsl(var(--h), calc(var(--s) * 1%), 50%)" in style
+    assert "1px solid #0000" in style
+    assert "fill:blue!important" in style.replace(" ", "").lower()
