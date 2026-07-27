@@ -138,8 +138,18 @@ def _restore_inline_styles_and_remove_markers(
     return str(soup)
 
 
+def _top_level_svgs(soup: BeautifulSoup) -> list:
+    """Return only outermost <svg> elements. A nested <svg> (e.g. an icon
+    sprite's <symbol>/<use> pattern) is already included when its ancestor
+    is stringified, so treating it as a separate item too would duplicate
+    it in the combined markup and desync the old/new svg correspondence
+    that replace_with() below relies on being 1:1 and in the same order."""
+    return [svg for svg in soup.find_all("svg") if svg.find_parent("svg") is None]
+
+
 def inline_svg_styles(html: str, css: str) -> str:
-    """Inline ``css`` onto every <svg> subtree in ``html`` and strip their classes.
+    """Inline ``css`` onto every top-level <svg> subtree in ``html`` and strip
+    their classes.
 
     All <svg>s are inlined together in a single premailer pass (rather than
     one pass per svg) so a page with many small icon svgs doesn't re-parse
@@ -148,7 +158,7 @@ def inline_svg_styles(html: str, css: str) -> str:
     stay class-based for the AI HTML/CSS regeneration passes.
     """
     soup = BeautifulSoup(html, "html.parser")
-    svgs = soup.find_all("svg")
+    svgs = _top_level_svgs(soup)
     if not svgs:
         return html
 
@@ -179,7 +189,7 @@ def inline_svg_styles(html: str, css: str) -> str:
         inlined, inline_attribute, original_styles,
     )
 
-    new_svgs = BeautifulSoup(inlined, "html.parser").find_all("svg")
+    new_svgs = _top_level_svgs(BeautifulSoup(inlined, "html.parser"))
     for old_svg, new_svg in zip(svgs, new_svgs):
         old_svg.replace_with(new_svg)
 
