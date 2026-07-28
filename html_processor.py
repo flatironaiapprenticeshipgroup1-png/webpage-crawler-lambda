@@ -1,79 +1,102 @@
-"""Prepare crawled HTML for downstream CSS regeneration."""
+"""Inline CSS onto <svg> elements only, ahead of AI HTML regeneration.
 
+Everything outside <svg> subtrees keeps its class-based styling untouched —
+the AI HTML regenerator (html_regenerator.py) preserves those classes and
+the AI CSS lambda regenerates the stylesheet that targets them. SVGs are the
+one case inlined here because selector-based CSS rewrites tend to mangle svg
+styling; their classes are stripped and their computed style is baked
+in as a style="..." attribute instead.
+"""
+
+import logging
 import re
-from urllib.parse import urljoin
 
+import cssutils
 from bs4 import BeautifulSoup
-from cssutils.css import CSSStyleDeclaration
 from premailer import transform
 
+# cssutils has poor support for modern CSS (var(), calc(), min()/max(),
+# hsl()/rgba() with var() arguments, 4-digit hex) and logs an ERROR for
+# every declaration it can't parse — harmless (it degrades gracefully
+# rather than raising) but extremely noisy against a real-world stylesheet.
+# Premailer depends on cssutils internally for its own stylesheet parsing,
+# so lowering the log level here (the same process-wide logger) is the only
+# way to quiet it.
+cssutils.log.setLevel(logging.CRITICAL)
 
-_HEAD_LINK_RELS_TO_REMOVE = {
-    "preload",
-    "prefetch",
-    "dns-prefetch",
-    "preconnect",
-    "canonical",
-    "alternate",
-    "manifest",
-    "stylesheet",
-}
-_HTML_DOCTYPE_RE = re.compile(r"<!doctype\s+html(?:\s+[^>]*)?>", re.IGNORECASE)
-_ANY_DOCTYPE_RE = re.compile(r"<!doctype[^>]*>", re.IGNORECASE)
+_IMPORTANT_RE = re.compile(r"!\s*important\s*$", re.IGNORECASE)
 
 
-def _is_stylesheet_link(tag) -> bool:
-    rel = tag.get("rel", [])
-    if isinstance(rel, str):
-        rel = rel.split()
-    return any(token.lower() == "stylesheet" for token in rel)
-
-
-def _rewrite_images(soup: BeautifulSoup, base_url: str, image_map: dict[str, str]) -> None:
-    for image in soup.find_all("img"):
-        src = image.get("src", "")
-        if not src or src.startswith("data:"):
+def _split_declarations(css_text: str) -> list[str]:
+    """Splits a `prop: value; prop2: value2;` string on top-level semicolons
+    only — not ones inside a quoted string or a function call's parentheses —
+    mirroring the depth-tracking approach ai-css-regeneration-lambda's
+    parse_css_blocks uses for CSS rule blocks, just applied to a declaration
+    list instead of a stylesheet."""
+    parts: list[str] = []
+    current: list[str] = []
+    depth = 0
+    quote = None
+    for ch in css_text:
+        if quote:
+            current.append(ch)
+            if ch == quote:
+                quote = None
             continue
-        absolute_url = urljoin(base_url, src)
-        image["src"] = image_map.get(absolute_url, absolute_url)
-
-
-def _clean_head(soup: BeautifulSoup) -> None:
-    head = soup.find("head")
-    if head is None:
-        return
-
-    for tag in head.find_all(["style", "noscript"]):
-        tag.decompose()
-
-    for tag in head.find_all("link"):
-        rel = tag.get("rel", [])
-        if isinstance(rel, str):
-            rel = rel.split()
-        normalized_rel = " ".join(rel).lower()
-        if normalized_rel in _HEAD_LINK_RELS_TO_REMOVE:
-            tag.decompose()
-
-    for tag in head.find_all("meta"):
-        property_value = tag.get("property", "")
-        name = tag.get("name", "").lower()
-        http_equiv = tag.get("http-equiv", "")
-        if (
-            property_value.startswith("og:")
-            or name.startswith("twitter:")
-            or http_equiv
-            or name == "robots"
-        ):
-            tag.decompose()
-
-
-def _mark_preserved_body_styles(soup: BeautifulSoup) -> None:
-    """Keep body-level CSS elements outside Premailer's cleanup boundary."""
-    for tag in soup.find_all(["style", "link"]):
-        if tag.find_parent("head") is not None:
+        if ch in ("'", '"'):
+            quote = ch
+            current.append(ch)
             continue
-        if tag.name == "style" or _is_stylesheet_link(tag):
-            tag["data-premailer"] = "ignore"
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(depth - 1, 0)
+        if ch == ";" and depth == 0:
+            parts.append("".join(current))
+            current = []
+            continue
+        current.append(ch)
+    if current:
+        parts.append("".join(current))
+    return parts
+
+
+def _parse_declarations(css_text: str) -> dict[str, tuple[str, str]]:
+    """Parses a declaration list into {property: (value, priority)}, in
+    source order. priority is "important" or "". Deliberately never
+    inspects a value's internal grammar — unlike cssutils' CSSStyleDeclaration,
+    this lets var()/calc()/min()/max()/etc. pass through untouched instead of
+    silently failing to parse and getting dropped."""
+    declarations: dict[str, tuple[str, str]] = {}
+    for raw in _split_declarations(css_text):
+        name, sep, value = raw.partition(":")
+        if not sep:
+            continue
+        name = name.strip().lower()
+        value = value.strip()
+        priority = ""
+        if _IMPORTANT_RE.search(value):
+            value = _IMPORTANT_RE.sub("", value).strip()
+            priority = "important"
+        if name:
+            declarations[name] = (value, priority)
+    return declarations
+
+
+def _merge_original_inline_style(generated_css: str, original_css: str) -> str:
+    generated = _parse_declarations(generated_css)
+    original = _parse_declarations(original_css)
+
+    for name, (value, priority) in original.items():
+        existing = generated.get(name)
+        if existing and existing[1] == "important" and priority != "important":
+            continue
+        generated[name] = (value, priority)
+
+    return "; ".join(
+        f"{name}: {value}" + (" !important" if priority == "important" else "")
+        for name, (value, priority) in generated.items()
+    )
 
 
 def _detach_inline_styles(soup: BeautifulSoup) -> tuple[str, dict[str, str]]:
@@ -98,19 +121,6 @@ def _detach_inline_styles(soup: BeautifulSoup) -> tuple[str, dict[str, str]]:
     return attribute, original_styles
 
 
-def _merge_original_inline_style(generated_css: str, original_css: str) -> str:
-    generated = CSSStyleDeclaration(cssText=generated_css, validating=False)
-    original = CSSStyleDeclaration(cssText=original_css, validating=False)
-
-    for declaration in original:
-        generated_priority = generated.getPropertyPriority(declaration.name).lower()
-        original_priority = declaration.priority.lower()
-        if generated_priority == "important" and original_priority != "important":
-            continue
-        generated.setProperty(declaration.name, declaration.value, declaration.priority)
-    return generated.cssText
-
-
 def _restore_inline_styles_and_remove_markers(
     html: str,
     inline_attribute: str,
@@ -125,65 +135,62 @@ def _restore_inline_styles_and_remove_markers(
         elif tag.has_attr("style"):
             del tag["style"]
         del tag[inline_attribute]
-
-    for tag in soup.find_all(["style", "link"], attrs={"data-premailer": "ignore"}):
-        if tag.find_parent("head") is None:
-            del tag["data-premailer"]
     return str(soup)
 
 
-def _preserve_html_doctype(source_html: str, output_html: str) -> str:
-    if not _HTML_DOCTYPE_RE.search(source_html):
-        return output_html
+def _top_level_svgs(soup: BeautifulSoup) -> list:
+    """Return only outermost <svg> elements. A nested <svg> (e.g. an icon
+    sprite's <symbol>/<use> pattern) is already included when its ancestor
+    is stringified, so treating it as a separate item too would duplicate
+    it in the combined markup and desync the old/new svg correspondence
+    that replace_with() below relies on being 1:1 and in the same order."""
+    return [svg for svg in soup.find_all("svg") if svg.find_parent("svg") is None]
 
-    if _ANY_DOCTYPE_RE.search(output_html):
-        return _ANY_DOCTYPE_RE.sub("<!DOCTYPE html>", output_html, count=1)
-    return f"<!DOCTYPE html>\n{output_html}"
 
+def inline_svg_styles(html: str, css: str) -> str:
+    """Inline ``css`` onto every top-level <svg> subtree in ``html`` and strip
+    their classes.
 
-def prepare_inline_html(
-    html: str,
-    css: str,
-    base_url: str,
-    image_map: dict[str, str],
-) -> str:
-    """Clean the source head, rewrite image sources, and inline source CSS.
-
-    Relative image URLs intentionally resolve against ``base_url`` rather than a
-    document ``<base>`` element. The ``<base>`` element itself is preserved.
-    Relative CSS assets are not rebased; the combined source CSS is retained as a
-    separate artifact for downstream processing.
+    All <svg>s are inlined together in a single premailer pass (rather than
+    one pass per svg) so a page with many small icon svgs doesn't re-parse
+    the entire stylesheet once per svg. The rest of the document's classes,
+    stylesheet links, and head content are left completely untouched — those
+    stay class-based for the AI HTML/CSS regeneration passes.
     """
     soup = BeautifulSoup(html, "html.parser")
-    _rewrite_images(soup, base_url, image_map)
-    _clean_head(soup)
-    _mark_preserved_body_styles(soup)
-    inline_attribute, original_styles = _detach_inline_styles(soup)
+    svgs = _top_level_svgs(soup)
+    if not svgs:
+        return html
 
-    output = transform(
-        str(soup),
+    combined_soup = BeautifulSoup(
+        "".join(str(svg) for svg in svgs), "html.parser"
+    )
+    inline_attribute, original_styles = _detach_inline_styles(combined_soup)
+
+    # Known limitation: premailer parses the stylesheet via cssutils, which
+    # can't represent calc()/min()/max() or color functions (hsl()/rgba())
+    # wrapping var()/math — those declarations are silently dropped rather
+    # than inlined, even though the log-noise from attempting to parse them
+    # is now silenced above. A plain `var(--x)` or `calc(10px + 5px)` inlines
+    # fine; it's specifically those combinations that don't.
+    inlined = transform(
+        str(combined_soup),
         css_text=css,
         allow_network=False,
         disable_link_rewrites=True,
-        remove_classes=False,
+        remove_classes=True,
         keep_style_tags=False,
         disable_leftover_css=True,
         disable_validation=True,
         strip_important=False,
         align_floating_images=False,
-        disable_basic_attributes=[
-            "background",
-            "bgcolor",
-            "width",
-            "height",
-            "align",
-            "valign",
-        ],
+    )
+    inlined = _restore_inline_styles_and_remove_markers(
+        inlined, inline_attribute, original_styles,
     )
 
-    output = _restore_inline_styles_and_remove_markers(
-        output,
-        inline_attribute,
-        original_styles,
-    )
-    return _preserve_html_doctype(html, output)
+    new_svgs = _top_level_svgs(BeautifulSoup(inlined, "html.parser"))
+    for old_svg, new_svg in zip(svgs, new_svgs):
+        old_svg.replace_with(new_svg)
+
+    return str(soup)
