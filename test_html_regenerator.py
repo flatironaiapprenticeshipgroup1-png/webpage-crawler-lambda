@@ -1,4 +1,33 @@
-from html_regenerator import _strip_code_fences
+from unittest.mock import MagicMock
+
+from html_regenerator import _regenerate_chunk, _strip_code_fences
+
+
+def _fake_openai_client(content="<p>ok</p>"):
+    client = MagicMock()
+    client.chat.completions.create.return_value = MagicMock(
+        choices=[MagicMock(message=MagicMock(content=content), finish_reason="stop")],
+        usage=MagicMock(prompt_tokens=10, completion_tokens=20),
+    )
+    return client
+
+
+def test_no_theme_does_not_leak_none_into_head_prompt():
+    client = _fake_openai_client()
+    _regenerate_chunk(client, "<title>Old</title>", "head", None, 0, 1)
+
+    system_msg = client.chat.completions.create.call_args.kwargs["messages"][0]["content"]
+    assert "None" not in system_msg, f"Head prompt leaked literal None: {system_msg}"
+    assert "a clean, modern redesign using current web design best practices" in system_msg
+
+
+def test_no_theme_does_not_leak_none_into_body_prompt():
+    client = _fake_openai_client()
+    _regenerate_chunk(client, "<p>Hi</p>", "body", "", 0, 1)
+
+    system_msg = client.chat.completions.create.call_args.kwargs["messages"][0]["content"]
+    assert "None" not in system_msg, f"Body prompt leaked literal None: {system_msg}"
+    assert "a clean, modern redesign using current web design best practices" in system_msg
 
 
 def test_fully_fenced_response_with_language_tag_is_unwrapped():

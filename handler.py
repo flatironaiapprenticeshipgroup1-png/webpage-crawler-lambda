@@ -27,7 +27,7 @@ def lambda_handler(event, context):
         body = json.loads(record["body"])
         website_id = body["RegeneratedWebsiteId"]
         url = body["RegeneratedWebsiteUrl"]
-        theme = body.get("RegenerationTheme", "")
+        theme = body.get("RegenerationTheme") or ""
 
         seq = get_current_sequence(website_id, url)
         seq_lock = threading.Lock()
