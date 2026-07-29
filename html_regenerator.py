@@ -185,10 +185,14 @@ def _regenerate_chunk(
         )
         chunk = chunk[:_CHARS_HARD_LIMIT]
 
+    theme_description = theme.strip() if theme and theme.strip() else (
+        "a clean, modern redesign using current web design best practices"
+    )
+
     if label == "head":
         system_msg = (
             f"You are an HTML transformation expert for a website theme regeneration system.\n\n"
-            f"You will receive the contents of a <head> element. Transform it for the theme: {theme}\n\n"
+            f"You will receive the contents of a <head> element. Transform it for the theme: {theme_description}\n\n"
             f"REQUIRED:\n"
             f"- Add exactly one stylesheet link, even if the original had none: "
             f"<link rel=\"stylesheet\" href=\"./Regenerated-Styles.css\">\n"
@@ -203,7 +207,7 @@ def _regenerate_chunk(
         )
     else:
         system_msg = (
-            f"You are an expert web designer. Rebuild the following HTML fragment from scratch for the theme: {theme}\n\n"
+            f"You are an expert web designer. Rebuild the following HTML fragment from scratch for the theme: {theme_description}\n\n"
             f"Make it look visually impressive and clearly different from the original. "
             f"Design choices should feel intentional and cohesive — bold where it counts, "
             f"restrained where it doesn't. Avoid anything clunky, chaotic, or generic.\n\n"
